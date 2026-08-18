@@ -195,7 +195,7 @@ each stage as it happens, plus a status line per stage below.
 | Stage | Name | Status |
 |---|---|---|
 | 0 | Architecture/bootstrap planning | Done |
-| 1 | Development environment | In progress — backend verified locally (ruff/mypy/pytest all pass); frontend and Docker Compose stack written but not run (no Node/Docker in the authoring environment) |
+| 1 | Development environment | Done — backend (ruff/mypy/pytest) and frontend (lint/typecheck/build) verified locally; full Docker Compose stack (db healthy, api, web) built and run end-to-end, `/health` confirmed reaching real Postgres, web page confirmed rendering live API data |
 | 2 | Core domain | Planned |
 | 3 | Auth/RBAC | Planned |
 | 4 | Upload/storage | Planned |

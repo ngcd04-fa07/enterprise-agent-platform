@@ -28,7 +28,7 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 1 (development environment) — in progress.
+**Status:** Stage 1 (development environment) — done.
 
 ## Repository layout
 
@@ -76,14 +76,18 @@ npm run build
 
 ## Verification status
 
-The backend (FastAPI app, config, health endpoint, tests) has been installed
-and run in this development environment: `ruff`, `mypy --strict`, and
-`pytest` all pass. The frontend and the Docker Compose stack (Postgres +
-pgvector, API container, web container) have been written against known-good
-Next.js 15 / Docker conventions but have **not** been run end-to-end here —
-this environment has no Node.js or Docker available. Run `docker compose up
---build` locally to verify the full stack; report back anything that fails
-so it can be fixed.
+Both the backend and frontend have been installed, built, and tested for
+real (not just written and assumed correct):
+
+- Backend: `ruff`, `mypy --strict`, and `pytest` all pass.
+- Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all
+  pass.
+- Full Docker Compose stack: `docker compose up --build` brings up Postgres
+  (healthy), the API, and the web app. `GET /health` returns
+  `{"status":"ok","database":"ok"}` against the real containerized Postgres,
+  and the web app server-renders that live health data — confirming the
+  db → api → web wiring end-to-end, including the same-origin proxy
+  architecture described in `docs/architecture.md`.
 
 ## Limitations
 

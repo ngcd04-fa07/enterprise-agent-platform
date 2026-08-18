@@ -11,6 +11,7 @@ __pycache__/
 node_modules/
 .next/
 npm-debug.log*
+*.tsbuildinfo
 
 # Env / secrets
 .env
