@@ -24,3 +24,6 @@ npm-debug.log*
 # Editors
 .vscode/
 .idea/
+
+# Claude Code agent worktrees (local tooling state, not project content)
+.claude/

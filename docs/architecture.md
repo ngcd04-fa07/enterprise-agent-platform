@@ -160,6 +160,61 @@ decision here.
 
 ---
 
+## Decision: Stage 2 API surface — repositories/services now, HTTP endpoints deferred
+
+**Context.** The roadmap lists "CRUD" under Stage 2 (core domain) but auth
+under Stage 3. `CLAUDE.md` forbids trusting a client-supplied
+`organisation_id`; tenant context must come from an authenticated session's
+membership, which doesn't exist until Stage 3 wires up auth.
+
+**Decision.** Stage 2 delivers models, an Alembic migration, and a fully
+tested repository/service layer (`OrganisationService`,
+`SubmissionService`, plus repositories for `Organisation`, `User`,
+`OrganisationMembership`, `Submission`, `Document`). No HTTP endpoints are
+exposed yet. `SubmissionRepository`/`SubmissionService` require
+`organisation_id` as an explicit parameter on every read/write and return
+the same "not found" outcome whether a submission doesn't exist or belongs
+to a different organisation — this is exercised directly by
+`test_tenant_isolation.py` at the service layer.
+
+**Why.** Building a real HTTP CRUD API now would mean either accepting
+`organisation_id` from the client (a security violation) or building a
+throwaway auth shim that Stage 3 immediately replaces (a half-finished
+implementation). Testing the isolation boundary at the service layer first
+means Stage 3's auth work sits on top of a layer that already can't leak
+across tenants, rather than being the only thing standing between a bug and
+a data leak.
+
+**Consequences.** Stage 3 exposes `POST/GET /submissions` etc. by wrapping
+these services with a dependency that derives `organisation_id` from the
+session — no new business logic, just wiring.
+
+## Decision: User model excludes credentials; Document has no service yet
+
+- `User` (Stage 2) has no password field. Credential storage belongs to
+  Stage 3 (Auth/RBAC), which owns the authentication mechanism end to end.
+- `Document` has a model + repository but no service/API. Real document
+  creation needs the object storage abstraction (Stage 4) to produce a
+  `storage_key`; wiring an endpoint that fakes that now would be a
+  half-finished feature. The repository exists so Stage 4/5 build on an
+  already-tested persistence layer.
+
+## Decision: Alembic runs via the async template
+
+Migrations use `async_engine_from_config` + `connection.run_sync(...)`
+(Alembic's standard async template) against the same `asyncpg` driver the
+app uses at runtime, rather than introducing a second sync driver
+(e.g. psycopg) just for migrations. One less dependency, one connection
+string, no behavioral gap between "how the app connects" and "how
+migrations connect."
+
+## Decision: Timestamps are timezone-aware
+
+`TimestampMixin` uses `DateTime(timezone=True)` (Postgres `TIMESTAMPTZ`),
+not the naive `TIMESTAMP` SQLAlchemy would otherwise default to. An audit
+trail with ambiguous timestamps is a known, easy-to-miss footgun — worth
+fixing before the first migration exists rather than after.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -181,6 +236,11 @@ library added yet — not justified by a single scaffold page.
 **Stage 1 infra:** `pgvector/pgvector:pg16` Docker image for Postgres (ships
 the pgvector extension pre-installed, avoiding a manual `CREATE EXTENSION`
 step in an init script for something we need from Stage 6 onward anyway).
+
+**Stage 2 backend:** `alembic` (migrations, async template — see decision
+above). `pytest_asyncio` fixtures added for a real-Postgres test layer
+(session-scoped engine, per-test transaction rollback, skips cleanly when
+no Postgres is reachable rather than failing).
 
 ---
 

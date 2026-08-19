@@ -123,7 +123,10 @@ ends with a stop point for explicit user go-ahead.
 - Frontend lint: `cd apps/web && npm run lint`
 - Frontend type check: `cd apps/web && npm run typecheck`
 - Frontend build: `cd apps/web && npm run build`
-- Migrations: _TBD (Stage 2 — alembic, once domain models exist)_
-- Database reset (local only): _TBD (Stage 2)_
+- Run migrations: `cd apps/api && alembic upgrade head`
+- New migration (review before trusting autogenerate): `cd apps/api &&
+  alembic revision --autogenerate -m "message"`
+- Database reset (local only): `docker compose down -v db && docker compose
+  up -d db && alembic upgrade head`
 - Benchmark: _TBD (Stage 11)_
 - Eval smoke test: _TBD (Stage 17)_
