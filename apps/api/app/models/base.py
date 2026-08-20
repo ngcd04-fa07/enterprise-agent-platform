@@ -1,6 +1,8 @@
+import enum
 import uuid
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy import DateTime, MetaData, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -30,3 +32,15 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+def str_enum_column(enum_cls: type[enum.Enum], *, name: str) -> sa.Enum:
+    """sa.Enum for an enum.StrEnum, persisting each member's `.value`
+    (lowercase, e.g. "draft") rather than SQLAlchemy's default of `.name`
+    (uppercase, e.g. "DRAFT"). Omitting values_callable here is a silent
+    runtime failure — every insert/read fails with
+    InvalidTextRepresentationError against the Postgres enum type, not a
+    type error caught by mypy — so this exists to make the correct call the
+    only call.
+    """
+    return sa.Enum(enum_cls, name=name, values_callable=lambda e: [member.value for member in e])

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 
 if TYPE_CHECKING:
     from app.models.organisation import Organisation
@@ -33,7 +33,9 @@ class OrganisationMembership(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    role: Mapped[MembershipRole] = mapped_column(sa.Enum(MembershipRole, name="membership_role"))
+    role: Mapped[MembershipRole] = mapped_column(
+        str_enum_column(MembershipRole, name="membership_role")
+    )
 
     organisation: Mapped["Organisation"] = relationship(back_populates="memberships")
     user: Mapped["User"] = relationship(back_populates="memberships")

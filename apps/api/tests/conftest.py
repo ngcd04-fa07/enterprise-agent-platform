@@ -3,13 +3,14 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401  registers all models on Base.metadata
 from app.core.config import get_settings
@@ -65,6 +66,21 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         bind=connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
     )
     session = sessionmaker()
+
+    # join_transaction_mode="create_savepoint" backs the session with a SAVEPOINT
+    # on top of the outer connection-level transaction. Any rollback of that
+    # SAVEPOINT (e.g. a repository test asserting a flush raises IntegrityError)
+    # ends it — without restarting it here, the connection is left without an
+    # active SAVEPOINT and later statements on it (including this fixture's own
+    # teardown, and every subsequent test sharing the session-scoped engine) fail
+    # with asyncpg InterfaceError. This is the SAVEPOINT-restart listener from
+    # SQLAlchemy's documented external-transaction test recipe.
+    @event.listens_for(session.sync_session, "after_transaction_end")
+    def _restart_savepoint(sync_session: Session, sync_transaction: object) -> None:
+        if connection.closed:
+            return
+        if not connection.sync_connection.in_nested_transaction():  # type: ignore[union-attr]
+            connection.sync_connection.begin_nested()  # type: ignore[union-attr]
 
     yield session
 

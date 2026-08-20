@@ -4,7 +4,7 @@ import uuid
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 from app.models.submission import Submission
 
 
@@ -39,7 +39,7 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     size_bytes: Mapped[int] = mapped_column(sa.BigInteger)
     storage_key: Mapped[str] = mapped_column(sa.String(1024))
     status: Mapped[DocumentStatus] = mapped_column(
-        sa.Enum(DocumentStatus, name="document_status"), default=DocumentStatus.UPLOADED
+        str_enum_column(DocumentStatus, name="document_status"), default=DocumentStatus.UPLOADED
     )
 
     submission: Mapped["Submission"] = relationship(back_populates="documents")

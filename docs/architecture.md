@@ -208,6 +208,42 @@ app uses at runtime, rather than introducing a second sync driver
 string, no behavioral gap between "how the app connects" and "how
 migrations connect."
 
+## Bug: SQLAlchemy Enum columns persisted `.name`, not `.value`
+
+**What happened.** The initial `str, enum.Enum` / `enum.StrEnum` models
+(`SubmissionStatus`, `MembershipRole`, `DocumentStatus`) used lowercase
+values (`"draft"`, `"admin"`, `"uploaded"`) and the hand-written migration
+created matching lowercase Postgres enum labels. `ruff`, `mypy --strict`,
+and every test passed — because the DB-dependent tests all ran in an
+environment with no reachable Postgres and skipped cleanly. Only when a
+real Postgres instance was available (via a separate verification pass —
+see below) did the real bug surface: `sa.Enum(SomeEnum, name=...)`
+defaults to persisting each member's `.name` (`"DRAFT"`), not `.value`
+(`"draft"`), unless `values_callable` is passed. Every insert/update
+through these three columns would have failed at runtime with
+`InvalidTextRepresentationError`, in an environment where mypy, ruff, and
+the full non-DB test suite were all green.
+
+**Fix.** Added `str_enum_column()` in `app/models/base.py` — a small
+helper that always passes `values_callable=lambda e: [m.value for m in
+e]`, used by all three enum columns, so the correct call is the only call
+available. Also added `compare_type=True` to `alembic/env.py`'s migration
+context — without it, `alembic revision --autogenerate` silently ignores
+column-*type* drift (which is exactly what this bug was) and only compares
+table/column/constraint presence, so the autogenerate drift-check that's
+supposed to catch hand-written-migration mistakes wouldn't have caught
+this one either.
+
+**Why this matters for how this project is verified.** This is the concrete
+argument for why `docs/architecture.md`'s "never claim unverified success"
+rule is load-bearing rather than a formality: static analysis and a
+"passing" test suite were both green while a real, first-write-fails bug
+sat in the database layer, because the tests were (correctly) skipping
+instead of exercising real Postgres. It's also why DB-dependent tests are
+written to skip loudly with a clear reason when unreachable, rather than
+silently — and why this project always follows up a "tests pass" claim
+with a real Postgres run before treating the DB layer as done.
+
 ## Decision: Timestamps are timezone-aware
 
 `TimestampMixin` uses `DateTime(timezone=True)` (Postgres `TIMESTAMPTZ`),

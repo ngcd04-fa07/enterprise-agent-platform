@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 
 if TYPE_CHECKING:
     from app.models.document import Document
@@ -26,7 +26,7 @@ class Submission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(sa.ForeignKey("users.id"))
     title: Mapped[str] = mapped_column(sa.String(255))
     status: Mapped[SubmissionStatus] = mapped_column(
-        sa.Enum(SubmissionStatus, name="submission_status"), default=SubmissionStatus.DRAFT
+        str_enum_column(SubmissionStatus, name="submission_status"), default=SubmissionStatus.DRAFT
     )
 
     documents: Mapped[list["Document"]] = relationship(

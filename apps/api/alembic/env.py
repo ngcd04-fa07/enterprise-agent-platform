@@ -30,7 +30,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # compare_type=True so `alembic revision --autogenerate` actually catches
+    # column-type drift (e.g. Postgres ENUM label mismatches) between the
+    # hand-authored migrations and the SQLAlchemy models, not just table and
+    # column presence.
+    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
         context.run_migrations()
 
