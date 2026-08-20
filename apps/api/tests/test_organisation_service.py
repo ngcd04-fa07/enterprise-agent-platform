@@ -9,7 +9,9 @@ from app.services.organisation_service import OrganisationService
 async def test_create_organisation_with_owner_creates_admin_membership(
     db_session: AsyncSession,
 ) -> None:
-    user = await UserRepository(db_session).create(email="owner@example.com", full_name="Owner")
+    user = await UserRepository(db_session).create(
+        email="owner@example.com", full_name="Owner", password_hash="test-hash"
+    )
 
     organisation = await OrganisationService(db_session).create_organisation_with_owner(
         name="Acme Insurance", owner_user_id=user.id

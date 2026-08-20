@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -88,3 +89,37 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     if transaction.is_active:
         await transaction.rollback()
     await connection.close()
+
+
+@pytest_asyncio.fixture
+async def client(db_session: AsyncSession) -> AsyncIterator[AsyncClient]:
+    """HTTP-level test client for the FastAPI app, wired to the same
+    transactional db_session as the rest of the test (imported lazily so
+    app.main — which reads Settings at import time — only loads after the
+    env var defaults above are already set).
+    """
+    from app.db.session import get_db_session
+    from app.main import app
+
+    async def _override_get_db_session() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    app.dependency_overrides[get_db_session] = _override_get_db_session
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client
+    app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest_asyncio.fixture
+async def second_client(client: AsyncClient) -> AsyncIterator[AsyncClient]:
+    """A second HTTP client sharing `client`'s dependency override (same
+    transactional db_session) but with its own cookie jar — for tests that
+    need two independently-authenticated users in one test, e.g. proving
+    one organisation's session can't act on another's data.
+    """
+    from app.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client

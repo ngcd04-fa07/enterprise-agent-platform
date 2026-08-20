@@ -22,7 +22,9 @@ async def test_submission_service_cannot_read_other_org_submission(
 ) -> None:
     org_a = await OrganisationRepository(db_session).create(name="Org A")
     org_b = await OrganisationRepository(db_session).create(name="Org B")
-    user_a = await UserRepository(db_session).create(email="a@example.com", full_name="A")
+    user_a = await UserRepository(db_session).create(
+        email="a@example.com", full_name="A", password_hash="test-hash"
+    )
 
     service = SubmissionService(db_session)
     submission = await service.create_submission(
@@ -38,7 +40,9 @@ async def test_submission_service_cannot_modify_other_org_submission(
 ) -> None:
     org_a = await OrganisationRepository(db_session).create(name="Org A")
     org_b = await OrganisationRepository(db_session).create(name="Org B")
-    user_a = await UserRepository(db_session).create(email="a2@example.com", full_name="A2")
+    user_a = await UserRepository(db_session).create(
+        email="a2@example.com", full_name="A2", password_hash="test-hash"
+    )
 
     service = SubmissionService(db_session)
     submission = await service.create_submission(

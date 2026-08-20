@@ -208,6 +208,70 @@ app uses at runtime, rather than introducing a second sync driver
 string, no behavioral gap between "how the app connects" and "how
 migrations connect."
 
+## Decision: "Active organisation" lives on the session, not the URL
+
+**Context.** A user can belong to multiple organisations (multiple
+`OrganisationMembership` rows). Every tenant-scoped endpoint needs an
+unambiguous `organisation_id` to scope its query — and per `CLAUDE.md`,
+that can never come from trusting a client-supplied value outright.
+
+**Decision.** `Session.active_organisation_id` tracks which org a session
+is currently acting within. `GET/POST /submissions` etc. take no
+`organisation_id` in the path or body — a `get_current_membership`
+dependency resolves it from the session server-side, then verifies (via a
+real DB lookup) that a membership actually exists for that user in that
+org before returning it. RBAC (`require_role`) is layered on top of that
+same membership's `role`.
+
+**Why.** This matches the API shapes in the original brief (`POST
+/submissions`, not `POST /organisations/{id}/submissions`) and mirrors how
+org-switcher apps work generally: pick an active org once, then every
+request implicitly operates within it. Critically, "the client sent an
+org_id" and "the server trusts it" are still two different things even in
+designs that DO put org_id in the path — the actual security property is
+the DB membership check, not where in the request the id appears. Putting
+it on the session just means callers don't have to.
+
+**Consequences.** Switching organisations needs its own endpoint (not
+built yet — no UI needs it before Stage 7's frontend exists to drive it).
+Every write in `SubmissionService`/`DocumentRepository` still requires an
+explicit `organisation_id` parameter at the repository/service layer —
+this decision only changes how the HTTP layer derives that value, not the
+tenant-isolation contract the service layer already enforces (see Stage 2
+decision above).
+
+## Decision: CSRF via double-submit token, no second cookie
+
+**Context.** Stage 0 committed to "CSRF protection via a double-submit
+token" for the cookie-session auth model.
+
+**Decision.** The session's `csrf_token` (a random value, stored
+server-side, unrelated to the session token itself) is returned in the
+JSON body of `/auth/register`, `/auth/login`, and `/auth/me` — not as a
+second cookie. The frontend is expected to hold onto it and echo it back
+as an `X-CSRF-Token` header on every mutating request; `require_csrf`
+compares it against the session row using `secrets.compare_digest`
+(constant-time).
+
+**Why.** The classic double-submit pattern uses two cookies (one
+HttpOnly, one JS-readable) specifically so a same-site page can read the
+second cookie via JS and echo it as a header. Since the CSRF token here is
+already returned in a JSON response body — which cross-site attackers
+can't read due to the same-origin policy, regardless of cookies — a
+second cookie adds no additional protection over just handing the token
+to the frontend directly. One fewer cookie to manage.
+
+## Decision: SESSION_SECRET keys an HMAC, not just present for future use
+
+`hash_token()` (app/auth/tokens.py) computes `HMAC-SHA256(SESSION_SECRET,
+raw_token)` rather than a bare `SHA256(raw_token)`. The raw token already
+has 256 bits of entropy from `secrets.token_urlsafe`, so this isn't
+protecting against brute-forcing the hash — it gives `SESSION_SECRET` (present
+in config since Stage 0/1 but previously unused) a genuine purpose:
+rotating it immediately invalidates every stored session at once, since
+every `hash_token` comparison starts failing. A deliberate "revoke all
+sessions" operational lever, not just leftover config.
+
 ## Bug: SQLAlchemy Enum columns persisted `.name`, not `.value`
 
 **What happened.** The initial `str, enum.Enum` / `enum.StrEnum` models
@@ -292,8 +356,8 @@ each stage as it happens, plus a status line per stage below.
 |---|---|---|
 | 0 | Architecture/bootstrap planning | Done |
 | 1 | Development environment | Done — backend (ruff/mypy/pytest) and frontend (lint/typecheck/build) verified locally; full Docker Compose stack (db healthy, api, web) built and run end-to-end, `/health` confirmed reaching real Postgres, web page confirmed rendering live API data |
-| 2 | Core domain | Planned |
-| 3 | Auth/RBAC | Planned |
+| 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
+| 3 | Auth/RBAC | In progress — cookie sessions, Argon2id password hashing, CSRF, RBAC, and the Submission HTTP API built; verified locally (ruff/mypy, 9 non-DB tests pass, 22 DB-dependent tests correctly skip); real-Postgres verification pending |
 | 4 | Upload/storage | Planned |
 | 5 | Parsing/chunking | Planned |
 | 6 | Embeddings/vector retrieval | Planned |

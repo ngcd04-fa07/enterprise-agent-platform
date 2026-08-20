@@ -27,9 +27,19 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
+    """Request-scoped session: commits once the endpoint returns without
+    raising, rolls back otherwise. FastAPI caches this per request, so every
+    dependency/route handler sharing it via Depends(get_db_session) sees the
+    same session and this commit/rollback runs exactly once.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def ping_database() -> bool:

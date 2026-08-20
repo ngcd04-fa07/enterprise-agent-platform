@@ -6,6 +6,7 @@ from app.models.base import Base
 from app.models.document import Document, DocumentStatus
 from app.models.membership import MembershipRole, OrganisationMembership
 from app.models.organisation import Organisation
+from app.models.session import Session
 from app.models.submission import Submission, SubmissionStatus
 from app.models.user import User
 
@@ -16,6 +17,7 @@ __all__ = [
     "MembershipRole",
     "Organisation",
     "OrganisationMembership",
+    "Session",
     "Submission",
     "SubmissionStatus",
     "User",

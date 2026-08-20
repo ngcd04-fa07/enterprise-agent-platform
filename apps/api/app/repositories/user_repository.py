@@ -10,8 +10,8 @@ class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, *, email: str, full_name: str) -> User:
-        user = User(email=email, full_name=full_name)
+    async def create(self, *, email: str, full_name: str, password_hash: str) -> User:
+        user = User(email=email, full_name=full_name, password_hash=password_hash)
         self._session.add(user)
         await self._session.flush()
         return user

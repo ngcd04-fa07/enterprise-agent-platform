@@ -13,7 +13,9 @@ from app.services.submission_service import SubmissionNotFoundError, SubmissionS
 
 async def _make_org_and_user(session: AsyncSession) -> tuple[Organisation, User]:
     organisation = await OrganisationRepository(session).create(name="Acme Insurance")
-    user = await UserRepository(session).create(email="uw@example.com", full_name="Underwriter")
+    user = await UserRepository(session).create(
+        email="uw@example.com", full_name="Underwriter", password_hash="test-hash"
+    )
     return organisation, user
 
 
