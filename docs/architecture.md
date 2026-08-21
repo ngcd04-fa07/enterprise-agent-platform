@@ -357,7 +357,7 @@ each stage as it happens, plus a status line per stage below.
 | 0 | Architecture/bootstrap planning | Done |
 | 1 | Development environment | Done — backend (ruff/mypy/pytest) and frontend (lint/typecheck/build) verified locally; full Docker Compose stack (db healthy, api, web) built and run end-to-end, `/health` confirmed reaching real Postgres, web page confirmed rendering live API data |
 | 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
-| 3 | Auth/RBAC | In progress — cookie sessions, Argon2id password hashing, CSRF, RBAC, and the Submission HTTP API built; verified locally (ruff/mypy, 9 non-DB tests pass, 22 DB-dependent tests correctly skip); real-Postgres verification pending |
+| 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
 | 4 | Upload/storage | Planned |
 | 5 | Parsing/chunking | Planned |
 | 6 | Embeddings/vector retrieval | Planned |

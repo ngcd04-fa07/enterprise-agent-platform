@@ -12,8 +12,8 @@ Architecture decisions and rationale live in
 
 Only checked once actually implemented and verified in this repo.
 
-- [ ] Multi-tenant architecture
-- [ ] RBAC
+- [x] Multi-tenant architecture
+- [x] RBAC
 - [ ] Document ingestion
 - [ ] Hybrid retrieval
 - [ ] Structured extraction
@@ -28,7 +28,7 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 1 (development environment) — done.
+**Status:** Stage 3 (Auth/RBAC) — done.
 
 ## Repository layout
 
@@ -76,21 +76,40 @@ npm run build
 
 ## Verification status
 
-Both the backend and frontend have been installed, built, and tested for
-real (not just written and assumed correct):
+Everything below has actually been run, not just written and assumed
+correct:
 
 - Backend: `ruff`, `mypy --strict`, and `pytest` all pass.
 - Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all
   pass.
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres
-  (healthy), the API, and the web app. `GET /health` returns
-  `{"status":"ok","database":"ok"}` against the real containerized Postgres,
-  and the web app server-renders that live health data — confirming the
-  db → api → web wiring end-to-end, including the same-origin proxy
-  architecture described in `docs/architecture.md`.
+  (healthy), the API, and the web app; `GET /health` and the web app's
+  server-rendered health display both confirm real db → api → web wiring.
+- Both Alembic migrations (`0001_initial_schema`, `0002_add_authentication`)
+  apply cleanly against real Postgres, and an `alembic revision
+  --autogenerate` afterward produces an empty diff — proof the hand-written
+  migrations exactly match the SQLAlchemy models, not just "look right."
+- All 31 backend tests pass against real Postgres, including both
+  cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
+  `test_user_cannot_modify_other_org_submission`) and an RBAC test proving a
+  viewer role is rejected from write endpoints.
+- Manual checks confirm the session cookie is `HttpOnly` with no `Secure`
+  flag in development (would otherwise silently block the cookie over
+  plain HTTP), CSRF is enforced in both directions (missing token → 403,
+  correct token → success), and the raw session token never appears in a
+  response body or server log — only its HMAC lives in the database.
+
+A real bug was caught this way during Stage 2: SQLAlchemy was persisting
+enum `.name` (`"DRAFT"`) instead of `.value` (`"draft"`), which passed
+`ruff`, `mypy`, and a "green" test suite (the DB tests correctly skip
+without Postgres) before a real-Postgres run surfaced it. See
+`docs/architecture.md` for the full account — it's the concrete reason
+this project treats "tests pass" as meaningless without a real database
+behind it.
 
 ## Limitations
 
-This is Stage 1 of an intentionally staged build. No auth, tenant model,
-document ingestion, retrieval, or agent workflow exists yet — see the
-roadmap table in [docs/architecture.md](docs/architecture.md).
+This is Stage 3 of an intentionally staged build. No document ingestion,
+retrieval, or agent workflow exists yet, and the frontend has no login UI
+yet (Stage 7) — see the roadmap table in
+[docs/architecture.md](docs/architecture.md).
