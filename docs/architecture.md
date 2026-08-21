@@ -118,6 +118,35 @@ for S3-compatible storage should only touch the implementation, never
 callers. Avoids introducing MinIO/AWS SDK dependencies before there's a real
 upload path to exercise them.
 
+**Stage 4 update — concrete implementation.** `FilesystemObjectStorage`
+(`app/storage/filesystem.py`) is now real: keys are always server-generated
+(`{organisation_id}/{uuid4()}.pdf`), never derived from a client filename,
+and `_resolve_path` independently verifies every resolved path stays under
+the storage root as defense in depth even though callers can't currently
+supply an unsafe key. `put_object`/`get_object`/`delete_object` wrap
+blocking file I/O in `asyncio.to_thread` so the async event loop is never
+blocked — the interface is async throughout specifically so a future
+`aioboto3`-backed S3 implementation is a drop-in swap.
+
+`generate_access_url()` deliberately raises `NotImplementedError` for the
+filesystem backend rather than returning something that looks like a URL
+but isn't safely usable: there's no public object store to sign a URL
+against yet, and building a fake local signing scheme just to satisfy the
+interface shape would be exactly the kind of half-finished feature
+`CLAUDE.md` warns against. Documents are instead served through the
+authenticated `GET /documents/{id}/content` endpoint, which reuses the
+existing session/RBAC/tenant checks — arguably a better safe-access story
+for local dev than a bare signed URL would be anyway. This method becomes
+meaningful once a real S3-compatible backend exists (Stage 21).
+
+**MinIO was considered and rejected for now.** It would make presigned
+URLs "real" locally, but adds a new docker-compose service and an AWS SDK
+dependency to rehearse a code path (`generate_access_url`) that isn't
+reachable from anywhere yet — no ingestion pipeline exists to consume a
+document by URL rather than by direct `get_object` call. Revisit if/when
+something actually needs an out-of-band URL rather than an authenticated
+download.
+
 ---
 
 ## Decision: Multi-tenant isolation strategy
@@ -315,6 +344,27 @@ not the naive `TIMESTAMP` SQLAlchemy would otherwise default to. An audit
 trail with ambiguous timestamps is a known, easy-to-miss footgun — worth
 fixing before the first migration exists rather than after.
 
+## Decision: Upload validation is layered, not a single check
+
+**Decision.** `DocumentService.upload_document` checks, in order:
+declared `Content-Type` against an allowlist (`application/pdf` only, per
+the brief's "PDF first" scope), size against `MAX_UPLOAD_SIZE_BYTES`, and
+finally the actual file bytes against the PDF magic number (`%PDF-`) —
+rejecting a mismatch even if the declared content-type was correct.
+
+**Why.** Per `CLAUDE.md`/the threat model, a filename extension or
+declared `Content-Type` is client-asserted and never trustworthy alone —
+a client can label anything `application/pdf`. Checking magic bytes is a
+cheap, dependency-free way to catch that class of mistake/abuse without
+needing a full PDF parser (parsing itself is Stage 5). Order matters:
+reject cheap/obvious mismatches (content-type, size) before touching the
+file's actual bytes.
+
+**Consequences.** This only proves the file *starts like* a PDF, not that
+it's a well-formed one — genuinely malformed or malicious PDFs (parser
+exploits, decompression bombs) are Stage 5's problem once real parsing
+exists, and are tracked in `docs/threat-model.md` when that's written.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -342,6 +392,16 @@ above). `pytest_asyncio` fixtures added for a real-Postgres test layer
 (session-scoped engine, per-test transaction rollback, skips cleanly when
 no Postgres is reachable rather than failing).
 
+**Stage 3 backend:** `argon2-cffi` (Argon2id password hashing — current
+OWASP-recommended default, ahead of bcrypt/PBKDF2). `email-validator`
+(justifies Pydantic's `EmailStr` for the one place we validate an email
+address, rather than hand-rolling regex validation).
+
+**Stage 4 backend:** `python-multipart` (required by Starlette/FastAPI to
+parse multipart file uploads — not optional once `UploadFile` is used).
+No object-storage SDK added — see the object storage decision above for
+why MinIO/S3 is deferred.
+
 ---
 
 ## Roadmap
@@ -358,7 +418,7 @@ each stage as it happens, plus a status line per stage below.
 | 1 | Development environment | Done — backend (ruff/mypy/pytest) and frontend (lint/typecheck/build) verified locally; full Docker Compose stack (db healthy, api, web) built and run end-to-end, `/health` confirmed reaching real Postgres, web page confirmed rendering live API data |
 | 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
-| 4 | Upload/storage | Planned |
+| 4 | Upload/storage | In progress — object storage abstraction, upload validation, and the document upload/download API built; verified locally (ruff/mypy, 14 non-DB tests pass, 30 DB-dependent tests correctly skip); real-Postgres verification pending |
 | 5 | Parsing/chunking | Planned |
 | 6 | Embeddings/vector retrieval | Planned |
 | 7 | Minimal frontend | Planned |

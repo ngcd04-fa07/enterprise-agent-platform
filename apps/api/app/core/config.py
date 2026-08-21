@@ -20,6 +20,13 @@ class Settings(BaseSettings):
 
     api_cors_origins: list[str] = []
 
+    # Filesystem-backed object storage root (see app/storage). Has a
+    # working default, unlike database_url/session_secret, because it's
+    # not security-relevant on its own — a wrong value fails loudly the
+    # first time a file is written, not silently.
+    storage_root: str = "./data/documents"
+    max_upload_size_bytes: int = 25 * 1024 * 1024
+
 
 @lru_cache
 def get_settings() -> Settings:

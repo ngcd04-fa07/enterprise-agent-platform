@@ -1,5 +1,6 @@
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -16,6 +17,8 @@ from sqlalchemy.orm import Session
 import app.models  # noqa: F401  registers all models on Base.metadata
 from app.core.config import get_settings
 from app.models.base import Base
+from app.storage.base import ObjectStorage
+from app.storage.filesystem import FilesystemObjectStorage
 
 # Matches the docker-compose / .env.example local dev defaults, so
 # `docker compose up -d db && pytest` just works without exporting anything.
@@ -91,8 +94,19 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     await connection.close()
 
 
+@pytest.fixture
+def object_storage(tmp_path: Path) -> ObjectStorage:
+    """A throwaway filesystem storage root per test — never the real
+    STORAGE_ROOT, so test uploads can't leak into (or be confused with)
+    real local dev data.
+    """
+    return FilesystemObjectStorage(str(tmp_path / "documents"))
+
+
 @pytest_asyncio.fixture
-async def client(db_session: AsyncSession) -> AsyncIterator[AsyncClient]:
+async def client(
+    db_session: AsyncSession, object_storage: ObjectStorage
+) -> AsyncIterator[AsyncClient]:
     """HTTP-level test client for the FastAPI app, wired to the same
     transactional db_session as the rest of the test (imported lazily so
     app.main — which reads Settings at import time — only loads after the
@@ -100,15 +114,18 @@ async def client(db_session: AsyncSession) -> AsyncIterator[AsyncClient]:
     """
     from app.db.session import get_db_session
     from app.main import app
+    from app.storage.factory import get_object_storage
 
     async def _override_get_db_session() -> AsyncIterator[AsyncSession]:
         yield db_session
 
     app.dependency_overrides[get_db_session] = _override_get_db_session
+    app.dependency_overrides[get_object_storage] = lambda: object_storage
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         yield async_client
     app.dependency_overrides.pop(get_db_session, None)
+    app.dependency_overrides.pop(get_object_storage, None)
 
 
 @pytest_asyncio.fixture

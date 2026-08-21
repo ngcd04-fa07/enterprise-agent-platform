@@ -24,8 +24,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_agent}:${POSTGRES_PASSWORD:-enterprise_agent}@db:5432/${POSTGRES_DB:-enterprise_agent}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
       ENVIRONMENT: development
+      STORAGE_ROOT: /data/documents
     ports:
       - "8000:8000"
+    volumes:
+      - document_storage:/data/documents
     depends_on:
       db:
         condition: service_healthy
@@ -43,3 +46,4 @@ services:
 
 volumes:
   db_data:
+  document_storage:

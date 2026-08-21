@@ -27,3 +27,6 @@ npm-debug.log*
 
 # Claude Code agent worktrees (local tooling state, not project content)
 .claude/
+
+# Local filesystem object storage (default STORAGE_ROOT, see app/core/config.py)
+apps/api/data/
