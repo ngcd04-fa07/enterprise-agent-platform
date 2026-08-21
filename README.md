@@ -28,9 +28,10 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 4 (Upload/storage) — done. Document ingestion isn't
-checked above yet — upload/storage exists, but parsing, chunking, and
-embeddings (Stages 5–6) don't.
+**Status:** Stage 5 (Parsing/chunking) — done. Document ingestion isn't
+checked above yet — upload, PDF parsing, chunking, and provenance all
+exist, but embeddings/vector retrieval (Stage 6) don't, so nothing is
+searchable yet.
 
 ## Repository layout
 
@@ -87,16 +88,21 @@ correct:
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres
   (healthy), the API, and the web app; `GET /health` and the web app's
   server-rendered health display both confirm real db → api → web wiring.
-- Both Alembic migrations (`0001_initial_schema`, `0002_add_authentication`)
-  apply cleanly against real Postgres, and an `alembic revision
-  --autogenerate` afterward produces an empty diff — proof the hand-written
-  migrations exactly match the SQLAlchemy models, not just "look right."
-- All 44 backend tests pass against real Postgres, including both
+- All three Alembic migrations (`0001_initial_schema`,
+  `0002_add_authentication`, `0003_add_pages_and_chunks`) apply cleanly
+  against real Postgres, and an `alembic revision --autogenerate` afterward
+  produces an empty diff each time — proof the hand-written migrations
+  exactly match the SQLAlchemy models, not just "look right."
+- All 55 backend tests pass against real Postgres, including both
   cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
   `test_user_cannot_modify_other_org_submission`), an RBAC test proving a
-  viewer role is rejected from write endpoints, and document upload/download
+  viewer role is rejected from write endpoints, document upload/download
   tests (valid PDF accepted, wrong content-type/oversized/content-type
-  mismatch all rejected, cross-org download denied).
+  mismatch all rejected, cross-org download denied), and PDF ingestion
+  tests (correct per-page text extraction, chunk provenance, an
+  unparseable PDF ending up `failed` rather than crashing the upload).
+- A live docker-compose upload of a real 2-page PDF confirmed correct
+  extracted text and page ordering end to end.
 - Manual checks confirm the session cookie is `HttpOnly` with no `Secure`
   flag in development (would otherwise silently block the cookie over
   plain HTTP), CSRF is enforced in both directions (missing token → 403,
@@ -107,19 +113,20 @@ correct:
   confirmed uploaded documents are genuinely durable on the storage volume,
   not just cached in the running process.
 
-A real bug was caught this way during Stage 2: SQLAlchemy was persisting
-enum `.name` (`"DRAFT"`) instead of `.value` (`"draft"`), which passed
-`ruff`, `mypy`, and a "green" test suite (the DB tests correctly skip
-without Postgres) before a real-Postgres run surfaced it. See
-`docs/architecture.md` for the full account — it's the concrete reason
-this project treats "tests pass" as meaningless without a real database
-behind it.
+Real bugs have been caught this way twice now, both invisible to mypy,
+ruff, and a "green" test suite (DB tests correctly skip without Postgres):
+Stage 2's enum `.name` vs `.value` persistence bug, and a Stage 5 bug
+where an expired `updated_at` after an UPDATE crashed every document
+upload (`MissingGreenlet` from an implicit lazy-refresh on a synchronous
+attribute access). See `docs/architecture.md` for both — they're the
+concrete reason this project treats "tests pass" as meaningless without a
+real database behind it.
 
 ## Limitations
 
-This is Stage 4 of an intentionally staged build. Documents can be
-uploaded and downloaded, but nothing parses them yet — no page extraction,
-chunking, embeddings, or retrieval exists (Stages 5–6), no agent workflow
-exists, and the frontend has no UI yet beyond the Stage 1 health check
-(Stage 7) — see the roadmap table in
+This is Stage 5 of an intentionally staged build. Documents are uploaded,
+parsed page-by-page, and chunked with provenance, but nothing is
+searchable yet — no embeddings, vector index, or retrieval exists
+(Stage 6), no agent workflow exists, and the frontend has no UI yet beyond
+the Stage 1 health check (Stage 7) — see the roadmap table in
 [docs/architecture.md](docs/architecture.md).

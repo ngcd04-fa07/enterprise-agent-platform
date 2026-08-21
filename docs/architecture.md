@@ -337,6 +337,49 @@ rotating it immediately invalidates every stored session at once, since
 every `hash_token` comparison starts failing. A deliberate "revoke all
 sessions" operational lever, not just leftover config.
 
+## Bug: expired `updated_at` crashed every document upload
+
+**What happened.** Stage 5's `IngestionService` calls
+`DocumentRepository.update_status` twice per upload (→ `processing`, then
+→ `ready`/`failed`) within the same request, and the route immediately
+serializes the same ORM object via `DocumentRead.model_validate(document)`.
+SQLAlchemy's default `eager_defaults` setting only re-fetches
+server-generated column values (like `TimestampMixin.updated_at`, which
+has `onupdate=func.now()`) via `RETURNING` on **INSERT** — not on UPDATE.
+After the second `update_status` flush, `updated_at` was left in an
+expired state; Pydantic's synchronous attribute access on it triggered an
+implicit lazy-refresh, which can't await the async DB round-trip and
+raises `MissingGreenlet`. This crashed every valid-PDF upload (7 tests) —
+caught only by a real-Postgres verification pass, exactly like the Stage
+2 enum bug, since nothing about this is visible to mypy, ruff, or a
+non-DB test run.
+
+**Fix.** `TimestampMixin` now sets `__mapper_args__ = {"eager_defaults":
+True}`, forcing `RETURNING` on UPDATE too, so `updated_at` stays populated
+in-memory the instant `flush()` returns. Applies to every model using the
+mixin, not just `Document`.
+
+## Gotcha: the API container didn't run migrations on startup
+
+**What happened.** `apps/api/Dockerfile` only `COPY`'d `app/`, not
+`alembic.ini`/`alembic/`, and its `CMD` only ever started `uvicorn` — a
+fresh `docker compose up` never actually applied migrations, silently
+relying on whoever ran `docker compose up -d db` locally having also run
+`alembic upgrade head` by hand at some point. Found during Stage 5
+verification when a genuinely fresh volume left the api container serving
+against a database with no tables.
+
+**Fix.** `Dockerfile` now copies `alembic.ini`/`alembic/` into the image
+and its `CMD` runs `alembic upgrade head && uvicorn ...` — migrations
+apply automatically on container start.
+
+**Consequence to revisit at Stage 21.** This is correct and simple for a
+single-instance dev/demo deployment. A real multi-replica production
+deployment would have multiple containers racing to run migrations
+simultaneously on every deploy — that needs migrations as a separate
+release step (a one-off job before replicas start), not part of each
+replica's own startup command.
+
 ## Bug: SQLAlchemy Enum columns persisted `.name`, not `.value`
 
 **What happened.** The initial `str, enum.Enum` / `enum.StrEnum` models
@@ -505,7 +548,7 @@ each stage as it happens, plus a status line per stage below.
 | 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
 | 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
-| 5 | Parsing/chunking | In progress — PDF parsing, DocumentPage/DocumentChunk models + migration, chunking baseline, and synchronous ingestion wired into upload built; verified locally (ruff/mypy, 21 non-DB tests pass, 34 DB-dependent tests correctly skip); real-Postgres verification pending |
+| 5 | Parsing/chunking | Done — all 55 tests pass against real Postgres; migration 0003 verified via empty autogenerate drift; a real bug found and fixed (expired `updated_at` crashing every upload — see below); a live docker-compose upload of a real 2-page PDF confirmed correct extracted text and page ordering; API container now runs migrations on startup |
 | 6 | Embeddings/vector retrieval | Planned |
 | 7 | Minimal frontend | Planned |
 | 8 | First milestone hardening | Planned |
