@@ -22,7 +22,19 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "document_chunks"
-    __table_args__ = (sa.UniqueConstraint("document_id", "chunk_index"),)
+    __table_args__ = (
+        sa.UniqueConstraint("document_id", "chunk_index"),
+        # Matches the HNSW index hand-created in migration 0004 (Postgres/pgvector
+        # index kinds aren't expressible via mapped_column(index=True)). Declaring
+        # it here too keeps autogenerate's model-vs-database diff empty instead of
+        # proposing to drop it as unmanaged.
+        sa.Index(
+            "ix_document_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("documents.id", ondelete="CASCADE"), index=True

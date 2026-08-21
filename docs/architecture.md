@@ -337,6 +337,22 @@ rotating it immediately invalidates every stored session at once, since
 every `hash_token` comparison starts failing. A deliberate "revoke all
 sessions" operational lever, not just leftover config.
 
+## Bug: HNSW index existed only in the migration, not the model
+
+**What happened.** Migration 0004 hand-created the
+`ix_document_chunks_embedding_hnsw` index via `op.create_index(...)`, but
+`app/models/document_chunk.py` never declared a matching SQLAlchemy
+`Index` (there's no `mapped_column(index=True)` equivalent for
+Postgres-specific index kinds like HNSW). Since the model is autogenerate's
+source of truth, `alembic revision --autogenerate` saw an index in the
+database that the model didn't know about and proposed dropping it —
+genuine drift, not a pgvector-type false positive.
+
+**Fix.** Declared the same index explicitly in `__table_args__` via
+`sa.Index(..., postgresql_using="hnsw", postgresql_ops={"embedding":
+"vector_cosine_ops"})`, matching the migration exactly. Confirmed via a
+second autogenerate pass: empty diff.
+
 ## Bug: expired `updated_at` crashed every document upload
 
 **What happened.** Stage 5's `IngestionService` calls
@@ -643,7 +659,7 @@ each stage as it happens, plus a status line per stage below.
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
 | 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
 | 5 | Parsing/chunking | Done — all 55 tests pass against real Postgres; migration 0003 verified via empty autogenerate drift; a real bug found and fixed (expired `updated_at` crashing every upload — see below); a live docker-compose upload of a real 2-page PDF confirmed correct extracted text and page ordering; API container now runs migrations on startup |
-| 6 | Embeddings/vector retrieval | In progress — embedding abstraction, local fastembed provider, pgvector column + HNSW index (migration 0004), synchronous embedding wired into ingestion, and vector search API built; verified locally (ruff/mypy, 25 non-DB tests pass — including real-model tests, 37 DB-dependent tests correctly skip); real-Postgres verification pending |
+| 6 | Embeddings/vector retrieval | Done — all 62 tests pass against real Postgres (including the real fastembed model); migration 0004 verified via autogenerate drift (after fixing a genuine gap — the HNSW index existed only in the migration, not the model, see below); a live docker-compose semantic search (query "how much did revenue grow" against 3 unrelated sentences) correctly ranked the revenue sentence highest (0.73 vs. 0.63/0.48) — real semantic search, not exact-match, proven end-to-end |
 | 7 | Minimal frontend | Planned |
 | 8 | First milestone hardening | Planned |
 | 9–21 | Structured extraction → deployment/polish | Planned |
