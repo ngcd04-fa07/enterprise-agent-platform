@@ -182,3 +182,37 @@ async def test_user_cannot_download_other_org_document(
     response = await second_client.get(f"/documents/{document_id}/content")
 
     assert response.status_code == 404
+
+
+async def test_list_submission_documents_returns_uploaded_documents(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="list1@example.com", organisation_name="Acme8")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+    await client.post(
+        f"/submissions/{submission['id']}/documents",
+        files={"file": ("first.pdf", VALID_PDF_BYTES, "application/pdf")},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
+    )
+    await client.post(
+        f"/submissions/{submission['id']}/documents",
+        files={"file": ("second.pdf", VALID_PDF_BYTES, "application/pdf")},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
+    )
+
+    response = await client.get(f"/submissions/{submission['id']}/documents")
+
+    assert response.status_code == 200
+    filenames = {document["filename"] for document in response.json()}
+    assert filenames == {"first.pdf", "second.pdf"}
+
+
+async def test_list_submission_documents_requires_own_organisation(
+    client: AsyncClient, second_client: AsyncClient
+) -> None:
+    auth_body = await _register(client, email="list2@example.com", organisation_name="Org A9")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+
+    await _register(second_client, email="list3@example.com", organisation_name="Org B9")
+
+    response = await second_client.get(f"/submissions/{submission['id']}/documents")
+
+    assert response.status_code == 404

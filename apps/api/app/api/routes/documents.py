@@ -82,6 +82,25 @@ async def upload_document(
     return DocumentRead.model_validate(document)
 
 
+@router.get("/submissions/{submission_id}/documents", response_model=list[DocumentRead])
+async def list_submission_documents(
+    submission_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    membership: Annotated[OrganisationMembership, Depends(get_current_membership)],
+) -> list[DocumentRead]:
+    try:
+        await SubmissionService(db).get_submission(
+            organisation_id=membership.organisation_id, submission_id=submission_id
+        )
+    except SubmissionNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Submission not found") from exc
+
+    documents = await DocumentRepository(db).list_for_submission(
+        organisation_id=membership.organisation_id, submission_id=submission_id
+    )
+    return [DocumentRead.model_validate(document) for document in documents]
+
+
 @router.get("/documents/{document_id}", response_model=DocumentRead)
 async def get_document(
     document_id: UUID,
