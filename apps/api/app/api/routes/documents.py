@@ -8,14 +8,17 @@ from app.auth.deps import get_current_membership, require_csrf, require_role
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models.membership import MembershipRole, OrganisationMembership
+from app.repositories.document_page_repository import DocumentPageRepository
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import DocumentRead
+from app.schemas.document_page import DocumentPageRead
 from app.services.document_service import (
     DocumentService,
     FileTooLargeError,
     InvalidFileContentError,
     UnsupportedContentTypeError,
 )
+from app.services.ingestion_service import IngestionService
 from app.services.submission_service import SubmissionNotFoundError, SubmissionService
 from app.storage.base import ObjectNotFoundError, ObjectStorage
 from app.storage.factory import get_object_storage
@@ -68,6 +71,11 @@ async def upload_document(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "File content does not match declared type"
         ) from exc
 
+    # Synchronous for now — see IngestionService docstring for why. A
+    # parsing failure surfaces as document.status == "failed" in the
+    # response, not as a failed upload: the file is safely stored either way.
+    document = await IngestionService(db, storage).ingest_document(document)
+
     return DocumentRead.model_validate(document)
 
 
@@ -83,6 +91,24 @@ async def get_document(
     if document is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     return DocumentRead.model_validate(document)
+
+
+@router.get("/documents/{document_id}/pages", response_model=list[DocumentPageRead])
+async def list_document_pages(
+    document_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    membership: Annotated[OrganisationMembership, Depends(get_current_membership)],
+) -> list[DocumentPageRead]:
+    document = await DocumentRepository(db).get(
+        organisation_id=membership.organisation_id, document_id=document_id
+    )
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    pages = await DocumentPageRepository(db).list_for_document(
+        organisation_id=membership.organisation_id, document_id=document_id
+    )
+    return [DocumentPageRead.model_validate(page) for page in pages]
 
 
 @router.get("/documents/{document_id}/content")

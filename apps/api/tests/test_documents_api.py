@@ -10,9 +10,10 @@ from app.main import app
 from app.models.membership import MembershipRole
 from app.repositories.membership_repository import OrganisationMembershipRepository
 from app.repositories.user_repository import UserRepository
+from tests.pdf_fixtures import build_minimal_pdf
 
 PASSWORD = "correct horse battery staple"
-VALID_PDF_BYTES = b"%PDF-1.4\n%%EOF"
+VALID_PDF_BYTES = build_minimal_pdf(["Sample content for testing."])
 
 
 async def _register(
@@ -56,7 +57,10 @@ async def test_upload_valid_pdf_succeeds(client: AsyncClient) -> None:
     assert body["filename"] == "application.pdf"
     assert body["content_type"] == "application/pdf"
     assert body["size_bytes"] == len(VALID_PDF_BYTES)
-    assert body["status"] == "uploaded"
+    # Ingestion runs synchronously within the upload request (see
+    # IngestionService docstring), so by the time the response is built the
+    # document has already gone uploaded -> processing -> ready.
+    assert body["status"] == "ready"
 
 
 async def test_upload_requires_csrf_token(client: AsyncClient) -> None:

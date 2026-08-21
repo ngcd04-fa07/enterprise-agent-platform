@@ -180,12 +180,31 @@ least one cross-tenant-denial test before being considered done (see
 
 ## Decision: Background job execution
 
-**Status.** Deferred — not decided yet. Per the brief, Celery/Redis must not
-be introduced by default. When document ingestion or agent runs first need
-to outlive a single HTTP request (Stage 5 onward), this section will compare
-FastAPI `BackgroundTasks`, a DB-backed job table/worker, and Redis/RQ against
-actual reliability/durability requirements at that point, and record the
-decision here.
+**Status.** Still deferred through Stage 5. Per the brief, Celery/Redis
+must not be introduced by default — and this is the section that decides
+when something *is* introduced.
+
+**Stage 5 consideration.** Ingestion (parse PDF → chunk → persist) now
+does real work inside the upload request. `FastAPI BackgroundTasks` was
+considered specifically for this, and rejected **for now**: making it
+correct requires the background task to open its own DB session/
+connection distinct from the request's — which is exactly right in
+production, but breaks this project's test-isolation strategy (each test
+runs inside an uncommitted, savepoint-backed transaction on one shared
+connection; a background task's separate connection would never see that
+transaction's writes, since Postgres only ever shows committed data across
+connections). Solving that properly needs a dependency-injectable session
+factory the test suite can override — real, buildable complexity, not
+currently justified by what it protects: ingestion here is small
+test/demo PDFs and pure-CPU parsing/chunking, genuinely fast.
+
+**Decision.** Process synchronously within the upload request
+(`IngestionService`, called directly from the upload route) until
+something makes that a real problem — the leading candidate is Stage 6's
+embedding API calls, which are genuinely slow and involve real network
+I/O, unlike PDF parsing. At that point, compare `BackgroundTasks` (with
+the session-factory-override work above), a DB-backed job table, and
+Redis/RQ against actual latency numbers, not speculation.
 
 ---
 
@@ -381,6 +400,50 @@ file's actual bytes.
 it's a well-formed one — genuinely malformed or malicious PDFs (parser
 exploits, decompression bombs) are Stage 5's problem once real parsing
 exists, and are tracked in `docs/threat-model.md` when that's written.
+Stage 5 confirms this: `IngestionService` catches parse failures against
+genuinely malformed content and marks the document `failed` rather than
+crashing the request — the upload itself still succeeds, since the file
+*is* safely stored either way.
+
+## Decision: PDF parser — `pypdf`
+
+**Options considered:** `pypdf` (pure Python, BSD license), `pdfplumber`
+(pdfminer.six-based, better layout/table awareness, heavier), `PyMuPDF`
+(fast, but AGPL-licensed — a real consideration for a project meant to be
+defensible in interviews), `pdfminer.six` directly (lower-level, more code
+to own).
+
+**Decision.** `pypdf` for baseline per-page text extraction.
+
+**Why.** Lowest dependency footprint, permissive license, and "extract
+text per page" is genuinely all Stage 5 needs — table/layout-aware
+extraction is a real future upgrade (structured extraction, Stage 9) but
+not required for a chunking baseline. Revisit if extraction quality on
+real-world PDFs (multi-column layouts, tables) proves inadequate.
+
+## Decision: Chunking is per-page, character-based, not token-based
+
+**Decision.** `chunk_text()` splits one page's text at a time — chunks
+never span pages — using fixed character windows
+(`DEFAULT_CHUNK_SIZE_CHARS = 2000`, `DEFAULT_CHUNK_OVERLAP_CHARS = 400`)
+rather than counting tokens.
+
+**Why per-page:** `DocumentChunk.page_id` is a single foreign key, not a
+list — a chunk needs exactly one page of provenance. Chunking within page
+boundaries makes that unambiguous for free; cross-page chunking would
+need a design for multi-page provenance that nothing here currently
+needs.
+
+**Why character-based, not token-based:** the brief's own example baseline
+is expressed in tokens (500/100 overlap), but "a token" is defined by
+whatever tokenizer the embedding model uses — and no embedding provider is
+chosen yet (that's Stage 6). Committing to a tokenizer now (e.g. `tiktoken`)
+would tie chunking to a specific provider before there's a reason to.
+~4 characters/token is a commonly-cited rough heuristic for English text,
+so 2000/400 characters approximates the brief's 500/100 tokens without the
+dependency. This is explicitly a naive baseline — no sentence/paragraph
+awareness — meant to be benchmarked against smarter chunkers later
+(Stage 11), not a permanent design.
 
 ## Dependency decisions log
 
@@ -419,6 +482,12 @@ parse multipart file uploads — not optional once `UploadFile` is used).
 No object-storage SDK added — see the object storage decision above for
 why MinIO/S3 is deferred.
 
+**Stage 5 backend:** `pypdf` (PDF text extraction — see decision above).
+No tokenizer library added (chunking is character-based, deliberately, to
+avoid committing to a tokenizer before Stage 6 picks an embedding
+provider) and no PDF-authoring library added (test fixtures build minimal
+valid PDF bytes by hand in `tests/pdf_fixtures.py` instead).
+
 ---
 
 ## Roadmap
@@ -436,7 +505,7 @@ each stage as it happens, plus a status line per stage below.
 | 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
 | 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
-| 5 | Parsing/chunking | Planned |
+| 5 | Parsing/chunking | In progress — PDF parsing, DocumentPage/DocumentChunk models + migration, chunking baseline, and synchronous ingestion wired into upload built; verified locally (ruff/mypy, 21 non-DB tests pass, 34 DB-dependent tests correctly skip); real-Postgres verification pending |
 | 6 | Embeddings/vector retrieval | Planned |
 | 7 | Minimal frontend | Planned |
 | 8 | First milestone hardening | Planned |
