@@ -16,9 +16,11 @@ from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401  registers all models on Base.metadata
 from app.core.config import get_settings
+from app.embeddings.base import EmbeddingProvider
 from app.models.base import Base
 from app.storage.base import ObjectStorage
 from app.storage.filesystem import FilesystemObjectStorage
+from tests.fake_embeddings import FakeEmbeddingProvider
 
 # Matches the docker-compose / .env.example local dev defaults, so
 # `docker compose up -d db && pytest` just works without exporting anything.
@@ -103,9 +105,20 @@ def object_storage(tmp_path: Path) -> ObjectStorage:
     return FilesystemObjectStorage(str(tmp_path / "documents"))
 
 
+@pytest.fixture
+def embedding_provider() -> EmbeddingProvider:
+    """Deterministic fake, not the real model — see fake_embeddings.py for
+    why. Real-model behavior is covered separately in
+    test_fastembed_provider.py.
+    """
+    return FakeEmbeddingProvider()
+
+
 @pytest_asyncio.fixture
 async def client(
-    db_session: AsyncSession, object_storage: ObjectStorage
+    db_session: AsyncSession,
+    object_storage: ObjectStorage,
+    embedding_provider: EmbeddingProvider,
 ) -> AsyncIterator[AsyncClient]:
     """HTTP-level test client for the FastAPI app, wired to the same
     transactional db_session as the rest of the test (imported lazily so
@@ -113,6 +126,7 @@ async def client(
     env var defaults above are already set).
     """
     from app.db.session import get_db_session
+    from app.embeddings.factory import get_embedding_provider
     from app.main import app
     from app.storage.factory import get_object_storage
 
@@ -121,11 +135,13 @@ async def client(
 
     app.dependency_overrides[get_db_session] = _override_get_db_session
     app.dependency_overrides[get_object_storage] = lambda: object_storage
+    app.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         yield async_client
     app.dependency_overrides.pop(get_db_session, None)
     app.dependency_overrides.pop(get_object_storage, None)
+    app.dependency_overrides.pop(get_embedding_provider, None)
 
 
 @pytest_asyncio.fixture

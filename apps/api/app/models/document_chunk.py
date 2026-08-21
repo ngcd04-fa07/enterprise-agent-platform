@@ -1,20 +1,24 @@
 import uuid
 
 import sqlalchemy as sa
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+# Fixed at the SQL column level (pgvector requires a fixed dimension per
+# column) to match the current embedding provider (FastEmbedProvider,
+# BAAI/bge-small-en-v1.5). Swapping to a different-dimension model later
+# needs a migration — that's inherent to pgvector, not a design choice.
+EMBEDDING_DIMENSION = 384
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """A chunk of one page's text (chunks never span pages — see
     docs/architecture.md, chunking decision). Carries its own
     organisation_id and submission_id, denormalized, so retrieval queries
-    (Stage 6) can filter by tenant/submission directly without joining
-    through document -> submission every time.
-
-    No embedding column yet — that lands in Stage 6 alongside pgvector,
-    once an embedding provider is actually chosen.
+    can filter by tenant/submission directly without joining through
+    document -> submission every time.
     """
 
     __tablename__ = "document_chunks"
@@ -36,3 +40,6 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     text: Mapped[str] = mapped_column(sa.Text)
     start_char: Mapped[int] = mapped_column(sa.Integer)
     end_char: Mapped[int] = mapped_column(sa.Integer)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSION), nullable=True
+    )

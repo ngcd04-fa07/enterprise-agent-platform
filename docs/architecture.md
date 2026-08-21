@@ -488,6 +488,94 @@ dependency. This is explicitly a naive baseline — no sentence/paragraph
 awareness — meant to be benchmarked against smarter chunkers later
 (Stage 11), not a permanent design.
 
+## Decision: Embedding provider — local `fastembed`, not `sentence-transformers`/API providers
+
+**Context.** The brief wants exactly one real embedding provider behind
+the `EmbeddingProvider` abstraction — no API key required was the explicit
+choice here (over OpenAI/Voyage), so verification (this project's own
+agents included) can exercise the real thing end to end without secrets.
+
+**Options considered:** `sentence-transformers` (the "local model" option
+initially named) pulls in `torch`, a genuinely heavy dependency (hundreds
+of MB to 2GB+); `fastembed` (Qdrant's library) uses ONNX Runtime instead,
+achieving the same "local, free, offline-after-first-use" intent for a
+much lighter footprint (~350MB total venv including it, vs. what torch
+alone would add).
+
+**Decision.** `fastembed`, default model `BAAI/bge-small-en-v1.5`
+(384 dimensions). This is a substitution for literally
+"sentence-transformers," not the underlying choice — the user chose
+"local model, no API key, no cost," and `fastembed` satisfies that intent
+more efficiently. Flagged here explicitly per `CLAUDE.md`'s "important
+architectural decisions must be visible and justified."
+
+**Why the query/document asymmetry matters.** `EmbeddingProvider` has
+separate `embed_query`/`embed_documents` methods, not one — BGE models
+specifically recommend an instruction prefix on the query side only;
+fastembed exposes this via distinct `query_embed`/`passage_embed` calls.
+Collapsing these into one method would silently produce worse retrieval
+quality for exactly the model chosen here.
+
+**Consequence — model warm-up.** Loading the model takes a few seconds
+(one-time download on first-ever run, then loading weights into memory on
+each process start). `app/main.py`'s lifespan handler calls
+`get_embedding_provider()` at startup specifically so this cost lands
+once, at boot, rather than surprising whichever user happens to upload or
+search first.
+
+## Decision: pgvector column + HNSW index, cosine distance
+
+**Decision.** `DocumentChunk.embedding` is a `pgvector` `Vector(384)`
+column (migration 0004), with an HNSW index using `vector_cosine_ops`.
+Enabling the extension (`CREATE EXTENSION IF NOT EXISTS vector`) happens
+in this migration, not earlier — the pgvector *extension binary* has
+shipped in the Docker image since Stage 1 (see that stage's dependency
+log), but the SQL-level `CREATE EXTENSION` call is what actually registers
+its types/operators in a given database, and there was nothing to index
+before this stage.
+
+**Why HNSW over IVFFlat:** IVFFlat needs a `lists` parameter tuned to
+expected row count ahead of time and degrades until enough rows exist to
+train it well; HNSW has no such cold-start tuning problem and generally
+gives better recall/latency for small-to-medium datasets, at the cost of
+slower index builds — a fine trade for this project's scale.
+
+**Why cosine, not L2/inner-product:** `bge-small-en-v1.5` (like most
+sentence-embedding models) is trained/evaluated for cosine similarity;
+matching the index's distance operator to what the model actually
+optimizes for is what makes nearest-neighbor search meaningful.
+
+**Embedding column is nullable.** A chunk could in principle exist before
+its embedding is computed (a future partial-failure/backfill path); the
+current `IngestionService` always computes it before persisting, but
+nothing forces that invariant at the schema level, so `search_similar`
+explicitly filters `embedding IS NOT NULL` rather than assuming it.
+
+## Decision: Search API and test strategy — real model vs. fake
+
+**Decision.** `POST /submissions/{id}/search` embeds the query and
+returns cosine-nearest chunks, tenant/submission-scoped, each with
+`document_id`, `page_number`, `text`, and `score` (`1 - distance`) — a
+source-aware result per the brief's "click a citation, see the source
+page" goal, even though the citation UI itself is Stage 7+. The response
+also carries `strategy` (`"vector"`, forward-compatible with Stage 10's
+hybrid retrieval) and `latency_ms`, per the brief's "retrieval should
+expose scores, source, strategy, latency."
+
+**Test strategy.** HTTP-level tests (`test_search_api.py`,
+`test_document_ingestion_api.py`, etc.) use `FakeEmbeddingProvider`
+(`tests/fake_embeddings.py`) — a deterministic hash-based stand-in at the
+*same* 384 dimensions as the real column, so it's valid against the real
+pgvector schema but requires no model download and adds no per-test
+latency. Its determinism gives a genuinely meaningful assertion for free:
+querying with text identical to a stored chunk yields distance 0 (score
+1.0), which is what `test_search_returns_exact_text_match_as_top_result`
+checks. Real embedding *quality* (does "revenue growth" score higher
+against a relevant sentence than an irrelevant one?) is verified
+separately in `test_fastembed_provider.py`, against the actual model —
+skipping cleanly if it can't load, the same pattern already used for
+DB-dependent tests.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -531,6 +619,12 @@ avoid committing to a tokenizer before Stage 6 picks an embedding
 provider) and no PDF-authoring library added (test fixtures build minimal
 valid PDF bytes by hand in `tests/pdf_fixtures.py` instead).
 
+**Stage 6 backend:** `fastembed` (local embeddings — see decision above,
+including why it replaced the initially-named `sentence-transformers`)
+and `pgvector` (the Python package providing SQLAlchemy's `Vector` type —
+distinct from the Postgres extension of the same name, which the
+`pgvector/pgvector` Docker image already ships).
+
 ---
 
 ## Roadmap
@@ -549,7 +643,7 @@ each stage as it happens, plus a status line per stage below.
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
 | 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
 | 5 | Parsing/chunking | Done — all 55 tests pass against real Postgres; migration 0003 verified via empty autogenerate drift; a real bug found and fixed (expired `updated_at` crashing every upload — see below); a live docker-compose upload of a real 2-page PDF confirmed correct extracted text and page ordering; API container now runs migrations on startup |
-| 6 | Embeddings/vector retrieval | Planned |
+| 6 | Embeddings/vector retrieval | In progress — embedding abstraction, local fastembed provider, pgvector column + HNSW index (migration 0004), synchronous embedding wired into ingestion, and vector search API built; verified locally (ruff/mypy, 25 non-DB tests pass — including real-model tests, 37 DB-dependent tests correctly skip); real-Postgres verification pending |
 | 7 | Minimal frontend | Planned |
 | 8 | First milestone hardening | Planned |
 | 9–21 | Structured extraction → deployment/polish | Planned |

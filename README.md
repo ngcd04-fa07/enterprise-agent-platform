@@ -28,10 +28,10 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 5 (Parsing/chunking) — done. Document ingestion isn't
-checked above yet — upload, PDF parsing, chunking, and provenance all
-exist, but embeddings/vector retrieval (Stage 6) don't, so nothing is
-searchable yet.
+**Status:** Stage 6 (Embeddings/vector retrieval) — built, local
+verification passing; real-Postgres verification in progress. Documents
+are uploaded, parsed, chunked, embedded (local model, no API key), and
+searchable via cosine similarity over pgvector.
 
 ## Repository layout
 
@@ -124,9 +124,10 @@ real database behind it.
 
 ## Limitations
 
-This is Stage 5 of an intentionally staged build. Documents are uploaded,
-parsed page-by-page, and chunked with provenance, but nothing is
-searchable yet — no embeddings, vector index, or retrieval exists
-(Stage 6), no agent workflow exists, and the frontend has no UI yet beyond
-the Stage 1 health check (Stage 7) — see the roadmap table in
+This is Stage 6 of an intentionally staged build, pending real-Postgres
+verification (pgvector/HNSW specifically needs it — nothing about a
+vector index can be meaningfully checked without a real Postgres). No
+lexical/hybrid retrieval or reranking exists yet (Stage 10), no agent
+workflow exists, and the frontend has no UI yet beyond the Stage 1 health
+check (Stage 7) — see the roadmap table in
 [docs/architecture.md](docs/architecture.md).

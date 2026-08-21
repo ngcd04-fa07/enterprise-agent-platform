@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_membership, require_csrf, require_role
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
+from app.embeddings.base import EmbeddingProvider
+from app.embeddings.factory import get_embedding_provider
 from app.models.membership import MembershipRole, OrganisationMembership
 from app.repositories.document_page_repository import DocumentPageRepository
 from app.repositories.document_repository import DocumentRepository
@@ -41,6 +43,7 @@ async def upload_document(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],
+    embeddings: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
     membership: Annotated[OrganisationMembership, Depends(_can_write)],
 ) -> DocumentRead:
     try:
@@ -74,7 +77,7 @@ async def upload_document(
     # Synchronous for now — see IngestionService docstring for why. A
     # parsing failure surfaces as document.status == "failed" in the
     # response, not as a failed upload: the file is safely stored either way.
-    document = await IngestionService(db, storage).ingest_document(document)
+    document = await IngestionService(db, storage, embeddings).ingest_document(document)
 
     return DocumentRead.model_validate(document)
 
