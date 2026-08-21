@@ -237,6 +237,23 @@ app uses at runtime, rather than introducing a second sync driver
 string, no behavioral gap between "how the app connects" and "how
 migrations connect."
 
+## Gotcha: pytest against a dev DB leaves `alembic_version` lying
+
+If you run `pytest` (with `DATABASE_URL` pointed at your local dev
+Postgres, e.g. via `docker compose up -d db`) and then try to use that
+same database with a live `uvicorn`/docker-compose `api` process, you'll
+hit `relation "users" does not exist` even though `alembic upgrade head`
+reports the schema is already at head. Cause: `tests/conftest.py`'s
+session-scoped `db_engine` fixture creates the schema with
+`Base.metadata.create_all()` and tears it down with
+`Base.metadata.drop_all()` — deliberately, for fast test isolation — but
+`drop_all()` doesn't touch the `alembic_version` table (it isn't part of
+`Base.metadata`), so Alembic is left believing the schema is current when
+every domain table is actually gone. This is intentional test design, not
+a bug — just run `docker compose down -v db && docker compose up -d db &&
+alembic upgrade head` to get a real schema back before hitting a live
+server against the same database pytest just used.
+
 ## Decision: "Active organisation" lives on the session, not the URL
 
 **Context.** A user can belong to multiple organisations (multiple
@@ -418,7 +435,7 @@ each stage as it happens, plus a status line per stage below.
 | 1 | Development environment | Done — backend (ruff/mypy/pytest) and frontend (lint/typecheck/build) verified locally; full Docker Compose stack (db healthy, api, web) built and run end-to-end, `/health` confirmed reaching real Postgres, web page confirmed rendering live API data |
 | 2 | Core domain | Done — models, migration, repository/service layer verified against real Postgres (11/11 tests, empty autogenerate drift); a real enum-persistence bug found and fixed along the way (see below) |
 | 3 | Auth/RBAC | Done — verified against real Postgres: both migrations apply cleanly, autogenerate drift-check empty, all 31 tests pass (incl. both named cross-tenant tests and RBAC), manual checks confirm HttpOnly cookie with no Secure flag in dev, CSRF enforced both ways, raw session token never appears in a response body or log |
-| 4 | Upload/storage | In progress — object storage abstraction, upload validation, and the document upload/download API built; verified locally (ruff/mypy, 14 non-DB tests pass, 30 DB-dependent tests correctly skip); real-Postgres verification pending |
+| 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
 | 5 | Parsing/chunking | Planned |
 | 6 | Embeddings/vector retrieval | Planned |
 | 7 | Minimal frontend | Planned |

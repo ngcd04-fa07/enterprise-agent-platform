@@ -28,7 +28,9 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 3 (Auth/RBAC) — done.
+**Status:** Stage 4 (Upload/storage) — done. Document ingestion isn't
+checked above yet — upload/storage exists, but parsing, chunking, and
+embeddings (Stages 5–6) don't.
 
 ## Repository layout
 
@@ -89,15 +91,21 @@ correct:
   apply cleanly against real Postgres, and an `alembic revision
   --autogenerate` afterward produces an empty diff — proof the hand-written
   migrations exactly match the SQLAlchemy models, not just "look right."
-- All 31 backend tests pass against real Postgres, including both
+- All 44 backend tests pass against real Postgres, including both
   cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
-  `test_user_cannot_modify_other_org_submission`) and an RBAC test proving a
-  viewer role is rejected from write endpoints.
+  `test_user_cannot_modify_other_org_submission`), an RBAC test proving a
+  viewer role is rejected from write endpoints, and document upload/download
+  tests (valid PDF accepted, wrong content-type/oversized/content-type
+  mismatch all rejected, cross-org download denied).
 - Manual checks confirm the session cookie is `HttpOnly` with no `Secure`
   flag in development (would otherwise silently block the cookie over
   plain HTTP), CSRF is enforced in both directions (missing token → 403,
   correct token → success), and the raw session token never appears in a
   response body or server log — only its HMAC lives in the database.
+- A live docker-compose check — register, create a submission, upload a
+  real PDF, download it back, restart the API container, download again —
+  confirmed uploaded documents are genuinely durable on the storage volume,
+  not just cached in the running process.
 
 A real bug was caught this way during Stage 2: SQLAlchemy was persisting
 enum `.name` (`"DRAFT"`) instead of `.value` (`"draft"`), which passed
@@ -109,7 +117,9 @@ behind it.
 
 ## Limitations
 
-This is Stage 3 of an intentionally staged build. No document ingestion,
-retrieval, or agent workflow exists yet, and the frontend has no login UI
-yet (Stage 7) — see the roadmap table in
+This is Stage 4 of an intentionally staged build. Documents can be
+uploaded and downloaded, but nothing parses them yet — no page extraction,
+chunking, embeddings, or retrieval exists (Stages 5–6), no agent workflow
+exists, and the frontend has no UI yet beyond the Stage 1 health check
+(Stage 7) — see the roadmap table in
 [docs/architecture.md](docs/architecture.md).
