@@ -8,6 +8,13 @@ RUN npm install
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# next.config.ts resolves API_ORIGIN when rewrites() is evaluated, and Next.js
+# bakes that resolved destination into .next/routes-manifest.json at build
+# time — next start does not re-evaluate it. So the compose service-to-service
+# origin must be available here as a build arg, not just as the container's
+# runtime environment variable.
+ARG API_ORIGIN
+ENV API_ORIGIN=$API_ORIGIN
 RUN npm run build
 
 FROM base AS run

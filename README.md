@@ -15,6 +15,7 @@ Only checked once actually implemented and verified in this repo.
 - [x] Multi-tenant architecture
 - [x] RBAC
 - [x] Document ingestion
+- [x] Minimal end-to-end frontend (register/login, submissions, upload, search)
 - [ ] Hybrid retrieval
 - [ ] Structured extraction
 - [ ] Evidence-level citations
@@ -28,10 +29,10 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 6 (Embeddings/vector retrieval) — done. Documents are
-uploaded, parsed, chunked, embedded (local model, no API key), and
-searchable via cosine similarity over pgvector — verified with real
-semantic queries, not just exact-text matches.
+**Status:** Stage 7 (Minimal frontend) — done. A working end-to-end UI
+exists: register, log in, create a submission, upload a PDF, watch it reach
+"ready," and run a real semantic search over it, all in the browser —
+verified live, not just via API tests.
 
 ## Repository layout
 
@@ -94,7 +95,7 @@ correct:
   `alembic revision --autogenerate` afterward produces an empty diff each
   time — proof the hand-written migrations exactly match the SQLAlchemy
   models, not just "look right."
-- All 62 backend tests pass against real Postgres, including both
+- All 64 backend tests pass against real Postgres, including both
   cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
   `test_user_cannot_modify_other_org_submission`), an RBAC test proving a
   viewer role is rejected from write endpoints, document upload/download
@@ -120,23 +121,33 @@ correct:
   real PDF, download it back, restart the API container, download again —
   confirmed uploaded documents are genuinely durable on the storage volume,
   not just cached in the running process.
+- A full real-browser walkthrough against the docker-compose stack (Stage 7):
+  register → create a submission → upload a real PDF → status reaches
+  "ready" with no manual refresh → a semantic, non-exact-match search query
+  returns correctly-ranked results with page number and score shown →
+  log out → redirected to `/login` → a fresh, logged-out browser session
+  navigating directly to a protected route is redirected rather than shown
+  stale or broken data.
 
-Real bugs have been caught this way three times now, all invisible to
+Real bugs have been caught this way four times now, all invisible to
 mypy, ruff, and a "green" test suite (DB tests correctly skip without
 Postgres): Stage 2's enum `.name` vs `.value` persistence bug, a Stage 5
 bug where an expired `updated_at` after an UPDATE crashed every document
 upload (`MissingGreenlet` from an implicit lazy-refresh on a synchronous
-attribute access), and a Stage 6 bug where a hand-created HNSW index
+attribute access), a Stage 6 bug where a hand-created HNSW index
 existed in the migration but not the SQLAlchemy model, so autogenerate's
 drift-check — the thing meant to catch exactly this class of mistake —
-would have proposed dropping it. See `docs/architecture.md` for all
-three — they're the concrete reason this project treats "tests pass" as
-meaningless without a real database behind it.
+would have proposed dropping it, and a Stage 7 bug where Next.js bakes its
+`rewrites()` proxy destination into the build output at `next build` time,
+so the web Dockerfile needed `API_ORIGIN` passed as a build arg (not just a
+runtime env var) for the docker-compose service-to-service origin to take
+effect. See `docs/architecture.md` for all four — they're the concrete
+reason this project treats "tests pass" as meaningless without a real
+database (and, now, a real browser) behind it.
 
 ## Limitations
 
-This is Stage 6 of an intentionally staged build. No lexical/hybrid
-retrieval or reranking exists yet (Stage 10), no structured extraction or
-agent workflow exists, and the frontend has no UI yet beyond the Stage 1
-health check (Stage 7) — see the roadmap table in
+This is Stage 7 of an intentionally staged build. No lexical/hybrid
+retrieval or reranking exists yet (Stage 10), and no structured extraction
+or agentic underwriting workflow exists yet — see the roadmap table in
 [docs/architecture.md](docs/architecture.md).

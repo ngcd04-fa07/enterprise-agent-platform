@@ -592,6 +592,26 @@ separately in `test_fastembed_provider.py`, against the actual model —
 skipping cleanly if it can't load, the same pattern already used for
 DB-dependent tests.
 
+## Bug: Next.js bakes rewrites() destination at build time, not runtime
+
+`next.config.ts`'s `rewrites()` resolves `API_ORIGIN` when it's evaluated,
+and Next.js bakes the resolved destination into `.next/routes-manifest.json`
+at `next build` time — `next start` does not re-evaluate it. The web
+Dockerfile's build stage ran `npm run build` with no `API_ORIGIN` set
+(docker-compose's `environment:` only applies at container *runtime*, not to
+`docker build`), so the config fell back to `http://localhost:8000`. Inside
+the `web` container at runtime nothing listens on `localhost:8000` — the API
+is a separate container reachable only at `api:8000` — so every browser-side
+`/api/*` call failed with `ECONNREFUSED` and the app never loaded past a
+loading/500 state through docker compose. Found during Stage 7's real
+browser walkthrough (a check that had no reason to run until a frontend
+existed to click through). Fixed by adding `ARG API_ORIGIN` / `ENV
+API_ORIGIN=$API_ORIGIN` before the build step in `apps/web/Dockerfile`, and
+passing `build.args.API_ORIGIN: http://api:8000` in `docker-compose.yml`.
+Verified the manifest bakes `http://api:8000` and the full user journey
+(register → upload → search → logout → redirect-when-unauthenticated) works
+end-to-end through docker compose.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -641,6 +661,13 @@ and `pgvector` (the Python package providing SQLAlchemy's `Vector` type —
 distinct from the Postgres extension of the same name, which the
 `pgvector/pgvector` Docker image already ships).
 
+**Stage 7 frontend:** No new dependencies — the minimal frontend (login,
+register, submissions list/detail, upload, search) is built on Stage 1's
+Next.js/React/TypeScript scaffold plus hand-written `fetch` wrappers
+(`lib/api.ts`) and a small `React.Context` for auth state
+(`lib/auth-context.tsx`); no data-fetching or form library was justified at
+this scale.
+
 ---
 
 ## Roadmap
@@ -660,6 +687,6 @@ each stage as it happens, plus a status line per stage below.
 | 4 | Upload/storage | Done — all 44 tests pass against real Postgres; a live docker-compose check (upload → volume-backed file → API container restart → re-download) confirmed the filesystem storage backend is genuinely durable, not just in-process |
 | 5 | Parsing/chunking | Done — all 55 tests pass against real Postgres; migration 0003 verified via empty autogenerate drift; a real bug found and fixed (expired `updated_at` crashing every upload — see below); a live docker-compose upload of a real 2-page PDF confirmed correct extracted text and page ordering; API container now runs migrations on startup |
 | 6 | Embeddings/vector retrieval | Done — all 62 tests pass against real Postgres (including the real fastembed model); migration 0004 verified via autogenerate drift (after fixing a genuine gap — the HNSW index existed only in the migration, not the model, see below); a live docker-compose semantic search (query "how much did revenue grow" against 3 unrelated sentences) correctly ranked the revenue sentence highest (0.73 vs. 0.63/0.48) — real semantic search, not exact-match, proven end-to-end |
-| 7 | Minimal frontend | Planned |
+| 7 | Minimal frontend | Done — frontend lint/typecheck/build pass; backend 64/64 tests pass against real Postgres; full docker-compose stack verified end-to-end via a real browser walkthrough (register → create submission → upload a real PDF → status reaches "ready" with no refresh → semantic, non-exact-match search returns correctly-ranked results with page/score → logout → redirect to `/login` → direct navigation to a protected route while logged out redirects, no stale data); a real bug found and fixed (Next.js bakes the rewrites() proxy destination at build time, so the web Dockerfile needed `API_ORIGIN` as a build arg, not just a runtime env var — see below); a missing ESLint `ignores` block (linting `next-env.d.ts`) also fixed |
 | 8 | First milestone hardening | Planned |
 | 9–21 | Structured extraction → deployment/polish | Planned |

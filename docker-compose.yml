@@ -36,6 +36,8 @@ services:
   web:
     build:
       context: ./apps/web
+      args:
+        API_ORIGIN: http://api:8000
     restart: unless-stopped
     environment:
       API_ORIGIN: http://api:8000
