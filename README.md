@@ -27,13 +27,16 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Automated evaluation
 - [ ] Regression testing
 - [ ] Model routing
-- [ ] CI/CD
+- [x] CI/CD
 
 **Status:** Stage 8 (First milestone hardening) — done. One end-to-end
 integration test walks the full user journey through the HTTP API, and CI
 now genuinely verifies the system: it runs real migrations before the test
 suite (a gap that had silently broken every CI run since Stage 6 — see
 below) and builds + boots the full docker-compose stack on every push.
+[Run 32779644596](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/runs/32779644596)
+is the first fully green CI run in this project's history — all three jobs
+(backend, docker-compose, frontend) passed.
 
 ## Repository layout
 
