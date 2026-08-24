@@ -29,10 +29,11 @@ Only checked once actually implemented and verified in this repo.
 - [ ] Model routing
 - [ ] CI/CD
 
-**Status:** Stage 7 (Minimal frontend) — done. A working end-to-end UI
-exists: register, log in, create a submission, upload a PDF, watch it reach
-"ready," and run a real semantic search over it, all in the browser —
-verified live, not just via API tests.
+**Status:** Stage 8 (First milestone hardening) — done. One end-to-end
+integration test walks the full user journey through the HTTP API, and CI
+now genuinely verifies the system: it runs real migrations before the test
+suite (a gap that had silently broken every CI run since Stage 6 — see
+below) and builds + boots the full docker-compose stack on every push.
 
 ## Repository layout
 
@@ -95,7 +96,7 @@ correct:
   `alembic revision --autogenerate` afterward produces an empty diff each
   time — proof the hand-written migrations exactly match the SQLAlchemy
   models, not just "look right."
-- All 64 backend tests pass against real Postgres, including both
+- All 65 backend tests pass against real Postgres, including both
   cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
   `test_user_cannot_modify_other_org_submission`), an RBAC test proving a
   viewer role is rejected from write endpoints, document upload/download
@@ -117,6 +118,14 @@ correct:
   plain HTTP), CSRF is enforced in both directions (missing token → 403,
   correct token → success), and the raw session token never appears in a
   response body or server log — only its HMAC lives in the database.
+- One end-to-end integration test (`test_full_journey.py`) walks the full
+  HTTP flow in a single test — register, create a submission, upload a PDF,
+  confirm it's parsed/chunked/searchable, log out, confirm the session is
+  gone — catching integration breaks between features that per-feature
+  tests can't see.
+- CI now actually runs migrations before the test suite (see the CI bug
+  below) and builds + boots the full docker-compose stack, polling
+  `/health` and the web app's landing page, on every push and PR.
 - A live docker-compose check — register, create a submission, upload a
   real PDF, download it back, restart the API container, download again —
   confirmed uploaded documents are genuinely durable on the storage volume,
@@ -137,17 +146,22 @@ upload (`MissingGreenlet` from an implicit lazy-refresh on a synchronous
 attribute access), a Stage 6 bug where a hand-created HNSW index
 existed in the migration but not the SQLAlchemy model, so autogenerate's
 drift-check — the thing meant to catch exactly this class of mistake —
-would have proposed dropping it, and a Stage 7 bug where Next.js bakes its
+would have proposed dropping it, a Stage 7 bug where Next.js bakes its
 `rewrites()` proxy destination into the build output at `next build` time,
 so the web Dockerfile needed `API_ORIGIN` passed as a build arg (not just a
 runtime env var) for the docker-compose service-to-service origin to take
-effect. See `docs/architecture.md` for all four — they're the concrete
-reason this project treats "tests pass" as meaningless without a real
-database (and, now, a real browser) behind it.
+effect, and a Stage 8 bug where CI's Postgres service had never had
+migrations applied, so the `vector` Postgres extension didn't exist and
+every test touching `document_chunks` had been silently erroring in CI
+since Stage 6 — invisible locally because local/remote verification always
+ran against a docker-compose Postgres that already had migrations applied.
+See `docs/architecture.md` for all five — they're the concrete reason this
+project treats "tests pass" as meaningless without a real database (and,
+now, a real browser, and a real from-scratch CI run) behind it.
 
 ## Limitations
 
-This is Stage 7 of an intentionally staged build. No lexical/hybrid
+This is Stage 8 of an intentionally staged build. No lexical/hybrid
 retrieval or reranking exists yet (Stage 10), and no structured extraction
 or agentic underwriting workflow exists yet — see the roadmap table in
 [docs/architecture.md](docs/architecture.md).

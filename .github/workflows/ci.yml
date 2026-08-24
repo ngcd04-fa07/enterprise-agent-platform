@@ -36,6 +36,11 @@ jobs:
         run: ruff check .
       - name: Type check (mypy)
         run: mypy app
+      - name: Run migrations
+        run: alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
+          SESSION_SECRET: ci-test-secret
       - name: Test (pytest)
         run: pytest
         env:
@@ -62,3 +67,48 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+
+  docker-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write .env
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=enterprise_agent
+          POSTGRES_PASSWORD=ci-test-password
+          POSTGRES_DB=enterprise_agent
+          SESSION_SECRET=ci-test-session-secret
+          EOF
+      - name: Build and start the stack
+        run: docker compose up --build -d
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health | grep -q '"database":"ok"'; then
+              echo "API healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy in time"
+          docker compose logs
+          exit 1
+      - name: Check web app serves the landing page
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000 | grep -q "Enterprise Agent Platform"; then
+              echo "Web app serving"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Web app did not come up in time"
+          docker compose logs
+          exit 1
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

@@ -612,6 +612,35 @@ Verified the manifest bakes `http://api:8000` and the full user journey
 (register → upload → search → logout → redirect-when-unauthenticated) works
 end-to-end through docker compose.
 
+## Bug: CI's Postgres service never had migrations applied
+
+Every push since Stage 6 landed migration `0004_add_chunk_embeddings`
+(which adds `document_chunks.embedding VECTOR(384)` and runs `CREATE
+EXTENSION IF NOT EXISTS vector`) had been failing CI, invisibly: the
+`backend` job's `pytest` step ran straight against the raw `pgvector/
+pgvector:pg16` service container with no migration step before it, and
+`tests/conftest.py`'s `db_engine` fixture creates tables via SQLAlchemy's
+`Base.metadata.create_all`, not Alembic — so nothing had ever run `CREATE
+EXTENSION vector` in CI's Postgres. Every DB-backed test touching
+`document_chunks` (39 of them) errored with `UndefinedObjectError: type
+"vector" does not exist`, while non-DB tests still passed, so the job's
+final line (e.g. "25 passed, 39 errors") looked like partial-but-real
+progress rather than the total DB-layer failure it was.
+
+This was invisible throughout Stages 6–7 because every verification in
+this project ran against a docker-compose Postgres that had already had
+`alembic upgrade head` applied (either by the API container's own startup
+command, or by a verification agent running the compose stack first) —
+never against a genuinely fresh, from-scratch CI environment. Caught only
+when Stage 8 checked actual CI run history (`gh run list`) instead of
+assuming a workflow file that looks correct is a workflow that has passed.
+Fixed by adding an explicit `alembic upgrade head` step before `pytest` in
+`.github/workflows/ci.yml`'s `backend` job (safe to combine with the
+fixture's own `create_all` — SQLAlchemy's `create_all` is checkfirst by
+default and no-ops on tables that already exist, which migrations and
+models are required to match exactly per the empty-autogenerate-diff
+check done at every migration).
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -668,6 +697,9 @@ Next.js/React/TypeScript scaffold plus hand-written `fetch` wrappers
 (`lib/auth-context.tsx`); no data-fetching or form library was justified at
 this scale.
 
+**Stage 8:** No new dependencies — hardening work only (a CI fix, one
+integration test, a documentation pass).
+
 ---
 
 ## Roadmap
@@ -688,5 +720,5 @@ each stage as it happens, plus a status line per stage below.
 | 5 | Parsing/chunking | Done — all 55 tests pass against real Postgres; migration 0003 verified via empty autogenerate drift; a real bug found and fixed (expired `updated_at` crashing every upload — see below); a live docker-compose upload of a real 2-page PDF confirmed correct extracted text and page ordering; API container now runs migrations on startup |
 | 6 | Embeddings/vector retrieval | Done — all 62 tests pass against real Postgres (including the real fastembed model); migration 0004 verified via autogenerate drift (after fixing a genuine gap — the HNSW index existed only in the migration, not the model, see below); a live docker-compose semantic search (query "how much did revenue grow" against 3 unrelated sentences) correctly ranked the revenue sentence highest (0.73 vs. 0.63/0.48) — real semantic search, not exact-match, proven end-to-end |
 | 7 | Minimal frontend | Done — frontend lint/typecheck/build pass; backend 64/64 tests pass against real Postgres; full docker-compose stack verified end-to-end via a real browser walkthrough (register → create submission → upload a real PDF → status reaches "ready" with no refresh → semantic, non-exact-match search returns correctly-ranked results with page/score → logout → redirect to `/login` → direct navigation to a protected route while logged out redirects, no stale data); a real bug found and fixed (Next.js bakes the rewrites() proxy destination at build time, so the web Dockerfile needed `API_ORIGIN` as a build arg, not just a runtime env var — see below); a missing ESLint `ignores` block (linting `next-env.d.ts`) also fixed |
-| 8 | First milestone hardening | Planned |
+| 8 | First milestone hardening | Done — added one full-journey integration test (`test_full_journey.py`); found and fixed a real bug where CI's Postgres service had never had migrations applied (silently erroring every DB-backed test touching `document_chunks` since Stage 6 — see below); added a CI job that builds and boots the full docker-compose stack and polls `/health` and the web landing page; 65/65 backend tests pass against real Postgres, including a from-scratch run seeded only by `docker compose up --build` (no manually-run migrations first) |
 | 9–21 | Structured extraction → deployment/polish | Planned |
