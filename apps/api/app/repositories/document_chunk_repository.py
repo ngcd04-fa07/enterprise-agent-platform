@@ -52,6 +52,23 @@ class DocumentChunkRepository:
         )
         return list(result.scalars().all())
 
+    async def list_for_submission(
+        self, *, organisation_id: uuid.UUID, submission_id: uuid.UUID
+    ) -> list[DocumentChunk]:
+        """Every chunk under a submission, across all its documents, in a
+        stable reading order — used by extraction, which reads chunk text
+        directly rather than doing a similarity search.
+        """
+        result = await self._session.execute(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.organisation_id == organisation_id,
+                DocumentChunk.submission_id == submission_id,
+            )
+            .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
+        )
+        return list(result.scalars().all())
+
     async def search_similar(
         self,
         *,

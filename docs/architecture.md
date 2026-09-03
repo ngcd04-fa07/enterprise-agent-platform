@@ -785,6 +785,91 @@ persisted row.
   future "switch active organisation" endpoint is added — that endpoint
   must re-verify membership server-side before calling it.
 
+## Decision: Stage 9 LLM provider — local Ollama, not a hosted API
+
+**Context.** Stage 9 (structured extraction) is the project's first actual
+LLM call — everything through Stage 8 used only local embeddings. The
+brief's `llm_gateway` abstraction had no concrete implementation yet.
+
+**Options considered.** Anthropic Claude API (originally proposed —
+strong structured-output support, but needs a real API key and incurs
+real per-call cost) vs. an open-weight model. Once redirected toward
+open-source, two further options: an open-weight model via a hosted API
+(Groq/Together/OpenRouter — still needs a key and costs money, but far
+more reliable structured output than a small model) vs. a fully local
+model via Ollama (no key, no cost, weaker reasoning).
+
+**Decision.** Local via Ollama, `qwen2.5:3b` (already installed/pulled in
+this dev environment). Mirrors the Stage 6 embedding decision exactly:
+"local model, no API key, no cost" over a hosted provider, this time by
+explicit user direction rather than the brief's default.
+
+**Consequence — provenance must be deterministic, not model-asserted.** A
+3B-parameter local model is meaningfully less reliable at complex
+structured reasoning than a frontier hosted model (confirmed in real
+end-to-end verification below: 3 of 5 target fields correctly extracted
+from a realistic two-page submission, zero hallucinated values). Asking
+the model to also name its own source chunk/page — the obvious design —
+would need a deterministic *existence* check (does this chunk_id exist,
+does it belong to this submission) to satisfy CLAUDE.md's "prefer
+deterministic logic," but existence isn't *correctness*: a model could
+cite a real chunk that isn't actually where the value came from, and an
+existence check can't catch that. Instead, `ExtractionService` runs one
+`generate_structured` call **per chunk**, asking only "what's in this
+specific chunk" and keeping the first non-null value found per field
+across chunks (in chunk order). The chunk a value came from is therefore
+always the chunk that was actually being read — never asserted by the
+model, never in need of a trust-but-verify check. Confirmed correct in
+live verification: values extracted from page 2 cited page 2, values from
+page 1 cited page 1, in every run.
+
+**Consequence — no per-call cost or key means more, smaller calls are
+fine.** One `generate_structured` call per chunk (rather than one call
+over the whole submission) would be a bad tradeoff against a paid API;
+against a free local model, it's simply the safer design per the point
+above, at the cost of some latency (a few seconds per chunk on CPU).
+
+**Consequence — kept out of docker-compose and CI.** Bundling Ollama in
+`docker-compose.yml` would mean baking or pulling a multi-gigabyte model
+on every `docker compose up --build`, which would make CI's
+`docker-compose` job slow and flaky for a check that currently only needs
+to confirm the stack boots. Structured extraction is therefore verified
+two ways instead: `tests/fake_llm_gateway.py`-backed tests (run in CI,
+exercise the full pipeline's logic deterministically) and
+`tests/test_ollama_gateway.py` (real model, skips cleanly if Ollama isn't
+reachable — same pattern as `test_fastembed_provider.py` for DB/model
+dependencies). Confirmed the failure mode is clean, not a crash: with the
+full `docker compose up --build` stack running (where the API container
+can't reach a host-run Ollama at the default `localhost:11434`, since
+that resolves to the container itself), `POST /submissions/{id}/extract`
+against a real uploaded document returned `200` with
+`{"status": "failed", "fields": []}` — no 500, no impact on any other
+route. A developer who wants extraction working through Docker Compose
+needs to point `OLLAMA_BASE_URL` at a reachable Ollama (e.g. run Ollama
+natively and use `host.docker.internal`, network-permitting) — not
+attempted or verified here; the native `apps/api` dev flow (venv +
+uvicorn, both processes on the host reaching `localhost:11434` directly)
+is what's actually verified end-to-end.
+
+**Real end-to-end verification.** Registered a user, created a
+submission, uploaded a real 2-page PDF with realistic underwriting
+submission text (named insured, business description, effective date on
+page 1; broker name and coverage limit on page 2), and called
+`POST /submissions/{id}/extract` against the real `qwen2.5:3b` model via
+Ollama (not the fake). Result: `business_description`, `broker_or_agent_name`,
+and `requested_coverage_limit` were extracted correctly, verbatim from the
+source text, each citing the correct source page (1, 2, and 2
+respectively) — confirmed by direct `psql` inspection of the persisted
+`extraction_runs`/`extracted_fields` rows, and by `GET
+/submissions/{id}/extraction` returning identical data to what the
+triggering `POST` returned. `named_insured` and
+`requested_effective_date`, both genuinely present in page 1's text, were
+*not* extracted — a real, honestly-reported reliability gap of the 3B
+model at this task, not a bug in the pipeline: the model returned null
+for those fields rather than inventing a wrong value, which is the
+correct failure mode for an underwriting tool (silence, not confident
+fabrication).
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -844,6 +929,12 @@ this scale.
 **Stage 8:** No new dependencies — hardening work only (a CI fix, one
 integration test, a documentation pass).
 
+**Stage 9 backend:** `httpx` moved from `dev` to a genuine runtime
+dependency — `OllamaGateway` uses it for the real HTTP call to Ollama, not
+just tests. No new package for the LLM itself: Ollama is a local process
+called over plain HTTP, so there's no Python SDK to add (unlike
+`fastembed`, which runs the model in-process).
+
 ---
 
 ## Roadmap
@@ -865,4 +956,5 @@ each stage as it happens, plus a status line per stage below.
 | 6 | Embeddings/vector retrieval | Done — all 62 tests pass against real Postgres (including the real fastembed model); migration 0004 verified via autogenerate drift (after fixing a genuine gap — the HNSW index existed only in the migration, not the model, see below); a live docker-compose semantic search (query "how much did revenue grow" against 3 unrelated sentences) correctly ranked the revenue sentence highest (0.73 vs. 0.63/0.48) — real semantic search, not exact-match, proven end-to-end |
 | 7 | Minimal frontend | Done — frontend lint/typecheck/build pass; backend 64/64 tests pass against real Postgres; full docker-compose stack verified end-to-end via a real browser walkthrough (register → create submission → upload a real PDF → status reaches "ready" with no refresh → semantic, non-exact-match search returns correctly-ranked results with page/score → logout → redirect to `/login` → direct navigation to a protected route while logged out redirects, no stale data); a real bug found and fixed (Next.js bakes the rewrites() proxy destination at build time, so the web Dockerfile needed `API_ORIGIN` as a build arg, not just a runtime env var — see below); a missing ESLint `ignores` block (linting `next-env.d.ts`) also fixed |
 | 8 | First milestone hardening | Done — added one full-journey integration test (`test_full_journey.py`); found and fixed a real bug where CI's Postgres service had never had migrations applied (silently erroring every DB-backed test touching `document_chunks` since Stage 6 — see below); added a CI job that builds and boots the full docker-compose stack and polls `/health` and the web landing page; 65/65 backend tests pass against real Postgres, including a from-scratch run seeded only by `docker compose up --build` (no manually-run migrations first); confirmed via GitHub Actions run 32779644596 — the first fully green CI run in this project's history (all three jobs: backend, docker-compose, frontend) |
-| 9–21 | Structured extraction → deployment/polish | Planned |
+| 9 | Structured extraction | Done — `llm_gateway` abstraction + `OllamaGateway` (local, open-source `qwen2.5:3b`, no API key); per-chunk extraction of 5 underwriting fields with deterministic (never model-asserted) provenance to a source chunk/page; `ExtractionRun`/`ExtractedField` tables (migration 0005, verified via empty autogenerate diff); 82/82 backend tests pass, including real-model tests against Ollama (not just the fake gateway); real end-to-end run against a realistic 2-page submission correctly extracted 3/5 fields with zero hallucination and exactly-correct page provenance, confirmed via direct psql inspection; confirmed graceful (200, `status: "failed"`) behavior through the full docker-compose stack when the API container can't reach Ollama — see the LLM provider decision below for why Ollama isn't containerized |
+| 10–21 | Hybrid retrieval → deployment/polish | Planned |

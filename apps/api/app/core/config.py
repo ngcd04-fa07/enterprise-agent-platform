@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     storage_root: str = "./data/documents"
     max_upload_size_bytes: int = 25 * 1024 * 1024
 
+    # Local, open-source LLM via Ollama (see app/llm_gateway) — no API key,
+    # so nothing security-relevant to fail loudly on here. Defaults match
+    # `ollama serve`'s default port and a model already used in dev; wrong
+    # values fail loudly the first time extraction is actually called
+    # (OllamaGateway raises LLMGenerationError), not silently.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:3b"
+
 
 @lru_cache
 def get_settings() -> Settings:

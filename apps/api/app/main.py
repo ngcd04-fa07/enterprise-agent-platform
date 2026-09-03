@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.documents import router as documents_router
+from app.api.routes.extraction import router as extraction_router
 from app.api.routes.health import router as health_router
 from app.api.routes.retrieval import router as retrieval_router
 from app.api.routes.submissions import router as submissions_router
@@ -25,6 +26,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # cold-start cost (model download on first-ever run, or just loading
     # weights into memory afterward) that nobody else sees.
     await asyncio.to_thread(get_embedding_provider)
+    # Deliberately no equivalent warm-up for the LLM gateway (app/llm_gateway):
+    # it's a remote HTTP call to Ollama, not an in-process model load, so
+    # there's no cold-start cost to hide — and gating the whole app's startup
+    # on an optional feature's external dependency being reachable would take
+    # down every other route if Ollama happens to be down.
     yield
 
 
@@ -62,3 +68,4 @@ app.include_router(auth_router)
 app.include_router(submissions_router)
 app.include_router(documents_router)
 app.include_router(retrieval_router)
+app.include_router(extraction_router)

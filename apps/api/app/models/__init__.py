@@ -6,6 +6,7 @@ from app.models.base import Base
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.document_page import DocumentPage
+from app.models.extraction import ExtractedField, ExtractionRun, ExtractionStatus
 from app.models.membership import MembershipRole, OrganisationMembership
 from app.models.organisation import Organisation
 from app.models.session import Session
@@ -18,6 +19,9 @@ __all__ = [
     "DocumentChunk",
     "DocumentPage",
     "DocumentStatus",
+    "ExtractedField",
+    "ExtractionRun",
+    "ExtractionStatus",
     "MembershipRole",
     "Organisation",
     "OrganisationMembership",

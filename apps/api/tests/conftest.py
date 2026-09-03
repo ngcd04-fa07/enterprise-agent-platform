@@ -17,10 +17,12 @@ from sqlalchemy.orm import Session
 import app.models  # noqa: F401  registers all models on Base.metadata
 from app.core.config import get_settings
 from app.embeddings.base import EmbeddingProvider
+from app.llm_gateway.base import LLMGateway
 from app.models.base import Base
 from app.storage.base import ObjectStorage
 from app.storage.filesystem import FilesystemObjectStorage
 from tests.fake_embeddings import FakeEmbeddingProvider
+from tests.fake_llm_gateway import FakeLLMGateway
 
 # Matches the docker-compose / .env.example local dev defaults, so
 # `docker compose up -d db && pytest` just works without exporting anything.
@@ -114,11 +116,21 @@ def embedding_provider() -> EmbeddingProvider:
     return FakeEmbeddingProvider()
 
 
+@pytest.fixture
+def llm_gateway() -> LLMGateway:
+    """Deterministic fake, not a real Ollama call — see fake_llm_gateway.py
+    for why. Real-model behavior is covered separately in
+    test_ollama_gateway.py.
+    """
+    return FakeLLMGateway()
+
+
 @pytest_asyncio.fixture
 async def client(
     db_session: AsyncSession,
     object_storage: ObjectStorage,
     embedding_provider: EmbeddingProvider,
+    llm_gateway: LLMGateway,
 ) -> AsyncIterator[AsyncClient]:
     """HTTP-level test client for the FastAPI app, wired to the same
     transactional db_session as the rest of the test (imported lazily so
@@ -127,6 +139,7 @@ async def client(
     """
     from app.db.session import get_db_session
     from app.embeddings.factory import get_embedding_provider
+    from app.llm_gateway.factory import get_llm_gateway
     from app.main import app
     from app.storage.factory import get_object_storage
 
@@ -136,12 +149,14 @@ async def client(
     app.dependency_overrides[get_db_session] = _override_get_db_session
     app.dependency_overrides[get_object_storage] = lambda: object_storage
     app.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
+    app.dependency_overrides[get_llm_gateway] = lambda: llm_gateway
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         yield async_client
     app.dependency_overrides.pop(get_db_session, None)
     app.dependency_overrides.pop(get_object_storage, None)
     app.dependency_overrides.pop(get_embedding_provider, None)
+    app.dependency_overrides.pop(get_llm_gateway, None)
 
 
 @pytest_asyncio.fixture
