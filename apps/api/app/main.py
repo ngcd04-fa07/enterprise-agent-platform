@@ -2,8 +2,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.documents import router as documents_router
@@ -36,6 +38,24 @@ if settings.api_cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+@app.exception_handler(IntegrityError)
+async def _integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    # A constraint violation (unique/FK) reaching here means a route didn't
+    # already translate it to a specific error — without this, Starlette's
+    # default handler would still hide the raw exception from the client
+    # (no debug leak either way), but as a bare, unhelpful 500. No current
+    # route can trigger this via ordinary use (all are checked beforehand),
+    # but it's a real gap for a future write endpoint that races a unique
+    # constraint (e.g. a membership invite) before it grows its own
+    # specific handling.
+    del request
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "The request conflicts with existing data."},
+    )
+
 
 app.include_router(health_router)
 app.include_router(auth_router)

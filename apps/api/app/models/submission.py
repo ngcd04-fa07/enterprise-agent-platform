@@ -23,6 +23,9 @@ class Submission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     organisation_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("organisations.id", ondelete="CASCADE"), index=True
     )
+    # No explicit ondelete: Postgres's default (NO ACTION/RESTRICT) is what
+    # we want here — a user shouldn't be deletable while they still have
+    # attributed submissions, unlike organisation_id above, which does cascade.
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(sa.ForeignKey("users.id"))
     title: Mapped[str] = mapped_column(sa.String(255))
     status: Mapped[SubmissionStatus] = mapped_column(

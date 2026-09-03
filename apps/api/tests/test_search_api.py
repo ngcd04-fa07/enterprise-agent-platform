@@ -8,9 +8,7 @@ from tests.pdf_fixtures import build_minimal_pdf
 PASSWORD = "correct horse battery staple"
 
 
-async def _register(
-    client: AsyncClient, *, email: str, organisation_name: str
-) -> dict[str, Any]:
+async def _register(client: AsyncClient, *, email: str, organisation_name: str) -> dict[str, Any]:
     response = await client.post(
         "/auth/register",
         json={
@@ -100,3 +98,56 @@ async def test_search_requires_submission_in_own_organisation(
     )
 
     assert response.status_code == 404
+
+
+async def test_search_rejects_empty_query(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="s5@example.com", organisation_name="Acme5")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+
+    response = await client.post(f"/submissions/{submission['id']}/search", json={"query": ""})
+
+    assert response.status_code == 422
+
+
+async def test_search_rejects_overlong_query(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="s6@example.com", organisation_name="Acme6")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+
+    response = await client.post(
+        f"/submissions/{submission['id']}/search", json={"query": "x" * 1001}
+    )
+
+    assert response.status_code == 422
+
+
+async def test_search_rejects_out_of_range_limit(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="s7@example.com", organisation_name="Acme7")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+
+    too_low = await client.post(
+        f"/submissions/{submission['id']}/search", json={"query": "anything", "limit": 0}
+    )
+    too_high = await client.post(
+        f"/submissions/{submission['id']}/search", json={"query": "anything", "limit": 51}
+    )
+
+    assert too_low.status_code == 422
+    assert too_high.status_code == 422
+
+
+async def test_search_limit_bounds_the_number_of_results(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="s8@example.com", organisation_name="Acme8")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+    pdf = build_minimal_pdf(
+        ["First distinct page.", "Second distinct page.", "Third distinct page."]
+    )
+    await _upload(
+        client, submission_id=submission["id"], csrf_token=auth_body["csrf_token"], pdf=pdf
+    )
+
+    response = await client.post(
+        f"/submissions/{submission['id']}/search", json={"query": "distinct page", "limit": 1}
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 1

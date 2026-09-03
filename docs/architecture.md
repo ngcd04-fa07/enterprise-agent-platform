@@ -641,6 +641,150 @@ default and no-ops on tables that already exist, which migrations and
 models are required to match exactly per the empty-autogenerate-diff
 check done at every migration).
 
+## Release-candidate audit before Stage 9 (Milestone 1)
+
+Before starting structured extraction (Stage 9), Stages 1-8 were audited as
+a release candidate: full-stack verification from a clean state, static
+checks, three focused code reviews (security, backend architecture, test
+quality), live two-organisation attack testing against the running Docker
+Compose stack, and direct database inspection. Full acceptance report
+delivered to the user; the durable findings are recorded here.
+
+### Bug: ingestion could leave partial DocumentPage/DocumentChunk rows on failure
+
+`IngestionService.ingest_document` runs entirely inside the single
+request-scoped transaction (see `app/db/session.py` — one commit, at the
+end of the request). Before this fix, a failure partway through parsing
+(e.g. the embedding call raising after some pages were already created)
+was caught by a broad `except Exception`, logged, and turned into a
+`FAILED` status update — but the `except` block never re-raised, so the
+outer `get_db_session` wrapper saw no exception and committed everything,
+including whatever `DocumentPage`/`DocumentChunk` rows had already been
+flushed before the failure. A document could end up `status=failed` with
+fully-persisted page rows still attached — a partial write CLAUDE.md
+explicitly forbids ("do not leave partial writes on failure").
+
+Reproduced directly: an embedding provider that always raises, uploaded
+against a real 2-page PDF, left both `DocumentPage` rows committed and
+queryable via `GET /documents/{id}/pages` even though the document was
+`failed`. Fixed by wrapping the parse/chunk/embed/persist block in
+`async with self._db.begin_nested()` — a SAVEPOINT that rolls back
+everything written inside it on exception, while leaving the outer session
+(and the subsequent `FAILED` status update) intact. Re-ran the same
+reproduction after the fix: pages list is now empty. Permanent regression
+test: `tests/test_ingestion_atomicity.py`.
+
+### Bug: an uploaded file could be orphaned on disk if the DB row failed to persist
+
+`DocumentService.upload_document` wrote the file to storage, then created
+the `Document` row — with no compensating action if the row creation
+failed after the file write succeeded (the file write isn't part of the
+DB transaction). Reproduced directly: calling `upload_document` with a
+`submission_id` that doesn't exist (FK violation on flush) left a real
+file on the test's storage root with no DB row and nothing accounting for
+it. Fixed by catching the exception, deleting the just-written object, and
+re-raising. Permanent regression test: `tests/test_document_service.py`
+(confirmed to fail without the fix, by temporarily reverting it and
+re-running).
+
+### Fix: upload size limit was enforced only after buffering the whole body
+
+`documents.py`'s upload route read the entire request body into memory
+(`await file.read()`) before `DocumentService` checked it against
+`max_upload_size_bytes` — so an arbitrarily large or malicious upload was
+fully buffered before being rejected. Changed to a bounded, chunked read
+(`_read_upload_bounded`, 1 MiB chunks) that raises `413` as soon as the
+cumulative size crosses the limit, without buffering past it. The
+service-layer check remains as a backstop for any other caller.
+
+### Fix: `ruff format --check` was never run — 6 files had drifted
+
+CI and local instructions only ever ran `ruff check` (lint rules), never
+`ruff format --check` (formatting). Running it during the audit found 6
+files that had drifted from the formatter's output (all whitespace/line-
+wrapping, no logic changes). Reformatted with `ruff format .` and added a
+`Format check (ruff)` step to CI's `backend` job, between lint and mypy,
+so this can't silently reaccumulate.
+
+### Fix: constraint violations reaching the API had no clean translation
+
+No route currently reachable through ordinary use can trigger a raw
+`IntegrityError` (every write path checks first), but there was no global
+handler for one — a future write endpoint that races a unique constraint
+(e.g. a Stage 9+ membership invite) would surface Starlette's generic,
+unhelpful 500 rather than a clean error. Added an `IntegrityError`
+exception handler in `app/main.py` returning `409 Conflict`. (Starlette's
+default 500 handler already hides exception internals from the client
+outside debug mode, so this isn't an information-leak fix — it's a
+usability one, ahead of endpoints that don't exist yet.)
+
+### Coverage added: repository-level tenant isolation with both orgs' data present
+
+Every existing cross-tenant test relied on an earlier gate (the owning
+submission/document lookup returning nothing, 404ing before the
+repository's own `organisation_id` filter ever ran) — so if that filter
+were ever dropped in a refactor, none of the existing tests would catch
+it. Added `test_document_page_repository_excludes_other_org_pages_when_both_present`
+and `test_document_chunk_repository_excludes_other_org_chunks_when_both_present`
+to `tests/test_tenant_isolation.py`, which create two real organisations'
+data (including two chunks with real embeddings, org B's deliberately the
+*nearer* vector match) and call the repository directly. Confirmed these
+catch the regression: temporarily removing the `organisation_id` filter
+from `search_similar` made org B's chunk leak into org A's results (and
+rank first) — the test failed exactly as expected; restored, it passes.
+
+### Coverage added: search input bounding
+
+`SearchRequest.limit` (`ge=1, le=50`) and `query` (`min_length=1,
+max_length=1000`) were constrained in the schema but never tested. Added
+`test_search_rejects_empty_query`, `test_search_rejects_overlong_query`,
+`test_search_rejects_out_of_range_limit`, and
+`test_search_limit_bounds_the_number_of_results` to `tests/test_search_api.py`.
+
+### Live two-organisation attack test (Docker Compose, real browser-equivalent HTTP)
+
+Ran a black-box attack script (curl, two independently-registered
+organisations, real PDF upload) against the full `docker compose up
+--build` stack — not against the test suite. Org B's session, holding a
+real UUID from Org A, was denied on: `GET /submissions/{id}`, `PATCH
+/submissions/{id}`, `GET /submissions/{id}/documents`, `GET
+/documents/{id}`, `GET /documents/{id}/pages`, `GET /documents/{id}/content`,
+and `POST /submissions/{id}/search` (all `404`, not `403` — no
+existence leak). A search for Org A's exact stored text, run inside Org
+B's *own* submission, returned zero results (no cross-tenant inference).
+An unauthenticated request returned `401`. Sanity-checked the *positive*
+path in the same run: Org A reading its own submission/pages/search
+returned `200` with correct data, and a direct `psql` query joining
+`document_chunks -> documents -> submissions -> organisations` confirmed
+`organisation_id`/`submission_id` are consistent end-to-end for the
+persisted row.
+
+### Known, deliberately deferred (not fixed in this audit)
+
+- **No pagination on list endpoints** (`list_submissions`,
+  `list_submission_documents`, `list_document_pages`,
+  `list_for_document` for pages/chunks) — unbounded today, fine at current
+  scale, real once a submission accumulates hundreds of pages/chunks or an
+  org accumulates years of submissions. Deferred: fixing it properly means
+  changing four response shapes, which is a small API contract expansion,
+  not a bugfix — better done deliberately with the rest of the API surface
+  than folded into an audit.
+- **No rate limiting / lockout on `POST /auth/login`.** Argon2id slows
+  each attempt but doesn't substitute for throttling. Deferred: needs a
+  library/middleware decision, not a contained code fix.
+- **`PROCESSING` status is never observable mid-request**, and the
+  request-scoped DB connection is held for the full parse+chunk+embed
+  duration (a connection-pool exhaustion risk under concurrent uploads).
+  Both are consequences of the deliberate synchronous-ingestion design
+  (see the Background job execution decision above) and aren't new — the
+  audit confirmed they're real but didn't change the architecture; moving
+  ingestion to a background job is a bigger decision than this audit's
+  scope.
+- **`SessionRepository.set_active_organisation` is unreachable dead
+  code** (no route calls it yet). Not a vulnerability; flagged for when a
+  future "switch active organisation" endpoint is added — that endpoint
+  must re-verify membership server-side before calling it.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency

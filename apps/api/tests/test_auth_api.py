@@ -106,9 +106,7 @@ async def test_logout_requires_csrf_token(client: AsyncClient) -> None:
 async def test_logout_revokes_session(client: AsyncClient) -> None:
     body = await _register(client)
 
-    response = await client.post(
-        "/auth/logout", headers={"X-CSRF-Token": body["csrf_token"]}
-    )
+    response = await client.post("/auth/logout", headers={"X-CSRF-Token": body["csrf_token"]})
     assert response.status_code == 204
 
     me_response = await client.get("/auth/me")

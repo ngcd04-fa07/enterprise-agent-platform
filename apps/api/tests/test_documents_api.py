@@ -16,9 +16,7 @@ PASSWORD = "correct horse battery staple"
 VALID_PDF_BYTES = build_minimal_pdf(["Sample content for testing."])
 
 
-async def _register(
-    client: AsyncClient, *, email: str, organisation_name: str
-) -> dict[str, Any]:
+async def _register(client: AsyncClient, *, email: str, organisation_name: str) -> dict[str, Any]:
     response = await client.post(
         "/auth/register",
         json={

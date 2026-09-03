@@ -12,9 +12,7 @@ from app.repositories.user_repository import UserRepository
 PASSWORD = "correct horse battery staple"
 
 
-async def _register(
-    client: AsyncClient, *, email: str, organisation_name: str
-) -> dict[str, Any]:
+async def _register(client: AsyncClient, *, email: str, organisation_name: str) -> dict[str, Any]:
     response = await client.post(
         "/auth/register",
         json={

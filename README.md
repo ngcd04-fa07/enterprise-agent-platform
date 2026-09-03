@@ -171,30 +171,33 @@ docker-compose.yml
 
 ## Verification & testing
 
-**Status:** Stage 8 (First milestone hardening) — done. 65 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → search → logout) has been walked both by an automated integration test and manually in a real browser.
+**Status:** Stage 8 (First milestone hardening) — done, and passed a release-candidate audit of Stages 1-8 before Stage 9. 73 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → search → logout) has been walked both by an automated integration test and manually in a real browser. The audit — three focused code reviews plus live two-organisation attack testing against the running stack — found and fixed a real partial-write bug in the ingestion pipeline and an orphaned-file bug in upload; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
 
 <details>
-<summary><strong>Full verification log — what was actually run, and five real bugs it caught</strong></summary>
+<summary><strong>Full verification log — what was actually run, and seven real bugs it caught</strong></summary>
 
-- Backend: `ruff`, `mypy --strict`, and `pytest` all pass.
+- Backend: `ruff`, `ruff format --check`, `mypy --strict`, and `pytest` all pass.
 - Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all pass.
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres (healthy), the API, and the web app end to end.
 - All four Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
-- All 65 backend tests pass against real Postgres, including cross-tenant-denial tests, an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF), and search tests against the real embedding model.
+- All 73 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, and search tests against the real embedding model.
 - A live Docker Compose **semantic** search check — not exact-text matching — is the strongest single proof point: querying *"how much did revenue grow"* against three unrelated sentences correctly ranked the revenue sentence highest (score 0.73 vs. 0.63 and 0.48), using the real local embedding model against real pgvector.
+- A live two-organisation attack test against the running Docker Compose stack (not the test suite): a real second organisation's session, holding real UUIDs from the first, was denied on every read/write path tried (submissions, documents, pages, content, search) — all `404`, no existence leak — while a search for the first org's exact text run inside the second org's own submission returned zero results.
 - Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
 - A live Docker Compose durability check — upload, download, restart the API container, download again — confirmed uploaded documents persist on the storage volume, not just in-process memory.
 - A full real-browser walkthrough against the Docker Compose stack: register → create a submission → upload a real PDF → status reaches "ready" with no manual refresh → a semantic, non-exact-match search returns correctly-ranked results with page number and score → log out → redirected to `/login` → direct navigation to a protected route while logged out redirects, no stale data.
 
-**Real bugs caught by insisting on a real database and a real browser instead of trusting a green test suite:**
+**Real bugs caught by insisting on a real database, a real browser, and a release-candidate audit instead of trusting a green test suite:**
 
 1. A SQLAlchemy `Enum` column persisting `.name` instead of `.value`.
 2. An expired `updated_at` after an `UPDATE` crashing every document upload (`MissingGreenlet`).
 3. A hand-created pgvector HNSW index that existed in the migration but not the SQLAlchemy model — autogenerate's own drift-check would have proposed dropping it.
 4. Next.js baking its `rewrites()` proxy destination into the build output at *build* time, so the Docker build needed `API_ORIGIN` passed as a build arg, not just a runtime env var.
 5. CI's Postgres service never had migrations applied, so the `vector` extension didn't exist and every chunk-related test had been silently erroring in CI since Stage 6 — invisible locally because every manual verification ran against a Postgres that already had migrations applied.
+6. A failed document ingestion could leave partially-persisted `DocumentPage`/`DocumentChunk` rows committed alongside the `failed` status — reproduced directly, fixed with a SAVEPOINT around the parse/chunk/embed block.
+7. A file could be orphaned on disk if the database row failed to persist after a successful storage write — reproduced directly (forced an FK violation), fixed with a compensating delete.
 
-Full writeups of all five: [`docs/architecture.md`](docs/architecture.md).
+Full writeups of all seven: [`docs/architecture.md`](docs/architecture.md).
 
 </details>
 

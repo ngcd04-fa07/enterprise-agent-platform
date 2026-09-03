@@ -55,14 +55,21 @@ class DocumentService:
         storage_key = f"{organisation_id}/{uuid.uuid4()}.pdf"
         await self._storage.put_object(storage_key, data, content_type=content_type)
 
-        return await self._documents.create(
-            organisation_id=organisation_id,
-            submission_id=submission_id,
-            filename=filename,
-            content_type=content_type,
-            size_bytes=len(data),
-            storage_key=storage_key,
-        )
+        try:
+            return await self._documents.create(
+                organisation_id=organisation_id,
+                submission_id=submission_id,
+                filename=filename,
+                content_type=content_type,
+                size_bytes=len(data),
+                storage_key=storage_key,
+            )
+        except Exception:
+            # The file write above isn't part of the DB transaction — if the
+            # row can't be created, delete what we just wrote so it isn't
+            # orphaned on disk with nothing to account for it.
+            await self._storage.delete_object(storage_key)
+            raise
 
     async def get_document_content(
         self, *, organisation_id: uuid.UUID, document_id: uuid.UUID

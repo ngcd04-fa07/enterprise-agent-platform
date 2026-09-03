@@ -9,9 +9,7 @@ from tests.pdf_fixtures import build_minimal_pdf
 PASSWORD = "correct horse battery staple"
 
 
-async def _register(
-    client: AsyncClient, *, email: str, organisation_name: str
-) -> dict[str, Any]:
+async def _register(client: AsyncClient, *, email: str, organisation_name: str) -> dict[str, Any]:
     response = await client.post(
         "/auth/register",
         json={

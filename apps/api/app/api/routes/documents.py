@@ -30,6 +30,27 @@ router = APIRouter(tags=["documents"])
 # Same RBAC split as submissions: admins/underwriters can upload, any role can read.
 _can_write = require_role(MembershipRole.ADMIN, MembershipRole.UNDERWRITER)
 
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_upload_bounded(file: UploadFile, *, max_size_bytes: int) -> bytes:
+    """Reads the upload in chunks, rejecting as soon as the cap is crossed
+    instead of buffering an arbitrarily large body into memory first —
+    DocumentService.upload_document still checks size too, as a backstop
+    for any other caller.
+    """
+    chunks: list[bytes] = []
+    total_size = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size_bytes:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 @router.post(
     "/submissions/{submission_id}/documents",
@@ -53,7 +74,7 @@ async def upload_document(
     except SubmissionNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Submission not found") from exc
 
-    data = await file.read()
+    data = await _read_upload_bounded(file, max_size_bytes=settings.max_upload_size_bytes)
     try:
         document = await DocumentService(db, storage).upload_document(
             organisation_id=membership.organisation_id,

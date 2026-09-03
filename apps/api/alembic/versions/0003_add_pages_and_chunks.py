@@ -103,9 +103,7 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_document_chunks_organisation_id"), "document_chunks", ["organisation_id"]
     )
-    op.create_index(
-        op.f("ix_document_chunks_submission_id"), "document_chunks", ["submission_id"]
-    )
+    op.create_index(op.f("ix_document_chunks_submission_id"), "document_chunks", ["submission_id"])
 
 
 def downgrade() -> None:
