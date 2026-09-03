@@ -1,67 +1,139 @@
 # Enterprise Agent Platform
 
-A production-oriented agentic AI platform for evidence-grounded,
-high-consequence document workflows. Fictional use case: commercial
-insurance underwriting document intelligence.
+**A production-oriented, agentic AI platform for evidence-grounded, high-consequence document workflows.**
+Fictional use case: commercial insurance underwriting document intelligence — every AI finding traces back to a source document, page, and chunk.
 
-Full engineering rules for this repo live in [CLAUDE.md](CLAUDE.md).
-Architecture decisions and rationale live in
-[docs/architecture.md](docs/architecture.md).
+[![CI](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
+![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+
+---
+
+## Why this exists
+
+Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
+
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 8 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test. Structured extraction, agentic workflows, MCP tool integrations, and observability are the next stages.
+
+## Table of contents
+
+- [Architecture](#architecture)
+- [Engineering highlights](#engineering-highlights)
+- [Capabilities](#capabilities)
+- [Tech stack](#tech-stack)
+- [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Verification & testing](#verification--testing)
+- [Documentation](#documentation)
+- [Limitations](#limitations)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Client
+        Browser
+    end
+
+    subgraph "apps/web — Next.js"
+        UI["React UI\n(login · submissions · upload · search)"]
+    end
+
+    subgraph "apps/api — FastAPI (modular monolith)"
+        Auth["Auth / RBAC\ncookie session + CSRF"]
+        Sub["Submissions"]
+        Ing["Ingestion\nparse → chunk → embed"]
+        Ret["Retrieval\nvector search"]
+    end
+
+    subgraph Storage
+        PG[("PostgreSQL\n+ pgvector (HNSW)")]
+        FS[("Object storage\n(filesystem, swappable)")]
+        EMB["Local embedding model\n(fastembed, no API key)"]
+    end
+
+    Browser -->|"same-origin /api/*"| UI
+    UI -->|HttpOnly cookie session| Auth
+    Auth --> Sub
+    Sub --> Ing
+    Ing --> FS
+    Ing --> EMB
+    Ing --> PG
+    Sub --> Ret
+    Ret --> PG
+
+    style PG fill:#4169E1,color:#fff
+    style EMB fill:#009688,color:#fff
+```
+
+Every arrow into Postgres carries `organisation_id` scoping enforced at the **repository layer**, not just the route — cross-tenant access fails even against a correctly-guessed UUID. See [Engineering highlights](#engineering-highlights).
+
+## Engineering highlights
+
+What this project is actually meant to demonstrate, beyond "it works":
+
+- **Tenant isolation enforced in SQL, not in the UI.** Every query touching submissions, documents, pages, or vector chunks filters `organisation_id` inside the `WHERE` clause — including the pgvector similarity search itself. Backed by explicit cross-tenant-denial tests, not just code review.
+- **Provenance is structural, not cosmetic.** Every chunk carries `document_id` / `page_id` / `submission_id` / `organisation_id`; every search result can be traced back to an exact page.
+- **Security-conscious auth by default.** Argon2id password hashing, HMAC-hashed session tokens (never stored raw), `HttpOnly` cookies, double-submit CSRF on every state-changing route, server-derived organisation/role on every request — no client-supplied `organisation_id` or `role` is ever trusted.
+- **Deterministic-first.** Chunking, validation, and citation-existence checks are plain code, not LLM calls — the model is used only where a rule genuinely can't do the job.
+- **Verification over vibes.** Every stage has been checked against a *real* Postgres instance and a *real* embedding model — not just a green test suite. This discipline has caught five real, reproducible bugs invisible to `mypy`/`ruff`/a passing local test run (enum persistence, an async lazy-load crash, a missing index on the model, a Docker build-arg bug, and a CI job that had silently never run migrations). Full writeups in [`docs/architecture.md`](docs/architecture.md).
+- **No hidden provider coupling.** LLM and embedding calls are abstracted behind a gateway interface — swapping providers touches one file, not business logic.
 
 ## Capabilities
 
-Only checked once actually implemented and verified in this repo.
+Only checked once actually implemented **and verified** in this repo — see [Verification & testing](#verification--testing).
 
-- [x] Multi-tenant architecture
-- [x] RBAC
-- [x] Document ingestion
-- [x] Minimal end-to-end frontend (register/login, submissions, upload, search)
-- [ ] Hybrid retrieval
-- [ ] Structured extraction
-- [ ] Evidence-level citations
-- [ ] Agentic underwriting workflow
-- [ ] Human approval / review
-- [ ] MCP integrations
-- [ ] Permission-aware tools
-- [ ] AI tracing / observability
-- [ ] Automated evaluation
-- [ ] Regression testing
-- [ ] Model routing
-- [x] CI/CD
+| | Capability |
+|---|---|
+| ✅ | Multi-tenant architecture (org-scoped, enforced server-side) |
+| ✅ | RBAC (admin / underwriter / reviewer / viewer) |
+| ✅ | Document ingestion (PDF → pages → chunks, with provenance) |
+| ✅ | Vector search (pgvector, HNSW, real semantic-not-exact-match verified) |
+| ✅ | End-to-end frontend (register, login, submissions, upload, search) |
+| ✅ | CI/CD (lint, types, tests, Docker build & boot, on every push) |
+| ⬜ | Hybrid (lexical + vector) retrieval |
+| ⬜ | Structured extraction |
+| ⬜ | Evidence-level citations in the UI |
+| ⬜ | Agentic underwriting workflow |
+| ⬜ | Human approval / review queue |
+| ⬜ | MCP integrations |
+| ⬜ | Permission-aware tool calling |
+| ⬜ | AI tracing / observability |
+| ⬜ | Automated evaluation harness |
+| ⬜ | Model routing |
 
-**Status:** Stage 8 (First milestone hardening) — done. One end-to-end
-integration test walks the full user journey through the HTTP API, and CI
-now genuinely verifies the system: it runs real migrations before the test
-suite (a gap that had silently broken every CI run since Stage 6 — see
-below) and builds + boots the full docker-compose stack on every push.
-[Run 32779644596](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/runs/32779644596)
-is the first fully green CI run in this project's history — all three jobs
-(backend, docker-compose, frontend) passed.
+## Tech stack
 
-## Repository layout
+| Layer | Choice | Why |
+|---|---|---|
+| Backend | FastAPI, Pydantic v2, SQLAlchemy 2.x (async) | Typed end-to-end, async-native, no framework magic hiding the SQL |
+| Database | PostgreSQL + pgvector (HNSW, cosine) | One source of truth for relational *and* vector data — no separate vector DB to keep in sync |
+| Embeddings | `fastembed` (local ONNX, `bge-small-en-v1.5`) | Real semantic search with zero API key / external dependency |
+| Auth | Argon2id + HMAC-hashed cookie sessions + CSRF | No JWT-in-localStorage XSS surface; server-side revocation |
+| Frontend | Next.js 15 (App Router) + TypeScript | Same-origin API proxy keeps the session cookie first-party |
+| Migrations | Alembic (async), autogenerate-diff-verified | Every migration checked to produce an empty diff against the models |
+| CI/CD | GitHub Actions | Lint, types, tests against real Postgres, full Docker Compose boot — every push |
 
-```
-apps/api/     FastAPI backend
-apps/web/     Next.js (App Router, TypeScript) frontend
-docs/         Architecture, threat model, evaluation docs
-.github/      CI workflows
-docker-compose.yml
-```
+## Quick start
 
-## Local development
-
-Requires Docker and Docker Compose. Backend can also run standalone with
-Python 3.12+; frontend standalone with Node 22+.
+Requires Docker and Docker Compose. (Backend can also run standalone with Python 3.12+; frontend standalone with Node 22+.)
 
 ```bash
+git clone https://github.com/ngcd04-fa07/enterprise-agent-platform.git
+cd enterprise-agent-platform
 cp .env.example .env   # fill in SESSION_SECRET and Postgres credentials
 docker compose up --build
 ```
 
-- API: http://localhost:8000/health
-- Web: http://localhost:3000
+- API: [http://localhost:8000/health](http://localhost:8000/health)
+- Web: [http://localhost:3000](http://localhost:3000)
 
-### Backend only
+<details>
+<summary><strong>Backend only</strong></summary>
 
 ```bash
 cd apps/api
@@ -72,7 +144,10 @@ mypy app
 pytest
 ```
 
-### Frontend only
+</details>
+
+<details>
+<summary><strong>Frontend only</strong></summary>
 
 ```bash
 cd apps/web
@@ -82,89 +157,52 @@ npm run typecheck
 npm run build
 ```
 
-## Verification status
+</details>
 
-Everything below has actually been run, not just written and assumed
-correct:
+## Repository layout
+
+```
+apps/api/     FastAPI backend — routes → services → repositories → models
+apps/web/     Next.js (App Router, TypeScript) frontend
+docs/         Architecture decisions, rationale, verification log
+.github/      CI workflows
+docker-compose.yml
+```
+
+## Verification & testing
+
+**Status:** Stage 8 (First milestone hardening) — done. 65 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → search → logout) has been walked both by an automated integration test and manually in a real browser.
+
+<details>
+<summary><strong>Full verification log — what was actually run, and five real bugs it caught</strong></summary>
 
 - Backend: `ruff`, `mypy --strict`, and `pytest` all pass.
-- Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all
-  pass.
-- Full Docker Compose stack: `docker compose up --build` brings up Postgres
-  (healthy), the API, and the web app; `GET /health` and the web app's
-  server-rendered health display both confirm real db → api → web wiring.
-- All four Alembic migrations (`0001_initial_schema`,
-  `0002_add_authentication`, `0003_add_pages_and_chunks`,
-  `0004_add_chunk_embeddings`) apply cleanly against real Postgres, and an
-  `alembic revision --autogenerate` afterward produces an empty diff each
-  time — proof the hand-written migrations exactly match the SQLAlchemy
-  models, not just "look right."
-- All 65 backend tests pass against real Postgres, including both
-  cross-tenant-denial tests (`test_user_cannot_read_other_org_submission`,
-  `test_user_cannot_modify_other_org_submission`), an RBAC test proving a
-  viewer role is rejected from write endpoints, document upload/download
-  tests (valid PDF accepted, wrong content-type/oversized/content-type
-  mismatch all rejected, cross-org download denied), PDF ingestion tests
-  (correct per-page text extraction, chunk provenance, an unparseable PDF
-  ending up `failed` rather than crashing the upload), and search tests
-  against the real embedding model.
-- A live docker-compose upload of a real 2-page PDF confirmed correct
-  extracted text and page ordering end to end.
-- A live docker-compose **semantic** search check — not exact-text
-  matching — is the strongest proof point so far: querying "how much did
-  revenue grow" against three unrelated sentences (revenue, headcount,
-  office location) correctly ranked the revenue sentence highest
-  (score 0.73 vs. 0.63 and 0.48), using the real local embedding model
-  against real pgvector.
-- Manual checks confirm the session cookie is `HttpOnly` with no `Secure`
-  flag in development (would otherwise silently block the cookie over
-  plain HTTP), CSRF is enforced in both directions (missing token → 403,
-  correct token → success), and the raw session token never appears in a
-  response body or server log — only its HMAC lives in the database.
-- One end-to-end integration test (`test_full_journey.py`) walks the full
-  HTTP flow in a single test — register, create a submission, upload a PDF,
-  confirm it's parsed/chunked/searchable, log out, confirm the session is
-  gone — catching integration breaks between features that per-feature
-  tests can't see.
-- CI now actually runs migrations before the test suite (see the CI bug
-  below) and builds + boots the full docker-compose stack, polling
-  `/health` and the web app's landing page, on every push and PR.
-- A live docker-compose check — register, create a submission, upload a
-  real PDF, download it back, restart the API container, download again —
-  confirmed uploaded documents are genuinely durable on the storage volume,
-  not just cached in the running process.
-- A full real-browser walkthrough against the docker-compose stack (Stage 7):
-  register → create a submission → upload a real PDF → status reaches
-  "ready" with no manual refresh → a semantic, non-exact-match search query
-  returns correctly-ranked results with page number and score shown →
-  log out → redirected to `/login` → a fresh, logged-out browser session
-  navigating directly to a protected route is redirected rather than shown
-  stale or broken data.
+- Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all pass.
+- Full Docker Compose stack: `docker compose up --build` brings up Postgres (healthy), the API, and the web app end to end.
+- All four Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
+- All 65 backend tests pass against real Postgres, including cross-tenant-denial tests, an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF), and search tests against the real embedding model.
+- A live Docker Compose **semantic** search check — not exact-text matching — is the strongest single proof point: querying *"how much did revenue grow"* against three unrelated sentences correctly ranked the revenue sentence highest (score 0.73 vs. 0.63 and 0.48), using the real local embedding model against real pgvector.
+- Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
+- A live Docker Compose durability check — upload, download, restart the API container, download again — confirmed uploaded documents persist on the storage volume, not just in-process memory.
+- A full real-browser walkthrough against the Docker Compose stack: register → create a submission → upload a real PDF → status reaches "ready" with no manual refresh → a semantic, non-exact-match search returns correctly-ranked results with page number and score → log out → redirected to `/login` → direct navigation to a protected route while logged out redirects, no stale data.
 
-Real bugs have been caught this way four times now, all invisible to
-mypy, ruff, and a "green" test suite (DB tests correctly skip without
-Postgres): Stage 2's enum `.name` vs `.value` persistence bug, a Stage 5
-bug where an expired `updated_at` after an UPDATE crashed every document
-upload (`MissingGreenlet` from an implicit lazy-refresh on a synchronous
-attribute access), a Stage 6 bug where a hand-created HNSW index
-existed in the migration but not the SQLAlchemy model, so autogenerate's
-drift-check — the thing meant to catch exactly this class of mistake —
-would have proposed dropping it, a Stage 7 bug where Next.js bakes its
-`rewrites()` proxy destination into the build output at `next build` time,
-so the web Dockerfile needed `API_ORIGIN` passed as a build arg (not just a
-runtime env var) for the docker-compose service-to-service origin to take
-effect, and a Stage 8 bug where CI's Postgres service had never had
-migrations applied, so the `vector` Postgres extension didn't exist and
-every test touching `document_chunks` had been silently erroring in CI
-since Stage 6 — invisible locally because local/remote verification always
-ran against a docker-compose Postgres that already had migrations applied.
-See `docs/architecture.md` for all five — they're the concrete reason this
-project treats "tests pass" as meaningless without a real database (and,
-now, a real browser, and a real from-scratch CI run) behind it.
+**Real bugs caught by insisting on a real database and a real browser instead of trusting a green test suite:**
+
+1. A SQLAlchemy `Enum` column persisting `.name` instead of `.value`.
+2. An expired `updated_at` after an `UPDATE` crashing every document upload (`MissingGreenlet`).
+3. A hand-created pgvector HNSW index that existed in the migration but not the SQLAlchemy model — autogenerate's own drift-check would have proposed dropping it.
+4. Next.js baking its `rewrites()` proxy destination into the build output at *build* time, so the Docker build needed `API_ORIGIN` passed as a build arg, not just a runtime env var.
+5. CI's Postgres service never had migrations applied, so the `vector` extension didn't exist and every chunk-related test had been silently erroring in CI since Stage 6 — invisible locally because every manual verification ran against a Postgres that already had migrations applied.
+
+Full writeups of all five: [`docs/architecture.md`](docs/architecture.md).
+
+</details>
+
+## Documentation
+
+- [`CLAUDE.md`](CLAUDE.md) — the durable engineering constitution (architecture principles, security rules, workflow discipline) this repo is built under.
+- [`docs/architecture.md`](docs/architecture.md) — decision log, roadmap status table, and every bug found in verification, with root cause and fix.
 
 ## Limitations
 
-This is Stage 8 of an intentionally staged build. No lexical/hybrid
-retrieval or reranking exists yet (Stage 10), and no structured extraction
-or agentic underwriting workflow exists yet — see the roadmap table in
-[docs/architecture.md](docs/architecture.md).
+This is Stage 8 of an intentionally staged 21-stage build. No lexical/hybrid retrieval or reranking exists yet (Stage 10), and no structured extraction or agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md).
