@@ -17,7 +17,7 @@ Fictional use case: commercial insurance underwriting document intelligence — 
 
 Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
 
-It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 10 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, and hybrid (semantic + lexical) search. Retrieval benchmarking, agentic workflows, MCP tool integrations, and observability are the next stages.
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 11 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search, and a retrieval benchmark that measures it rather than taking it on faith. Agentic workflows, MCP tool integrations, and observability are the next stages.
 
 ## Table of contents
 
@@ -103,6 +103,7 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | ✅ | CI/CD (lint, types, tests, Docker build & boot, on every push) |
 | ✅ | Structured extraction (local open-source LLM, per-chunk, deterministic provenance) |
 | ✅ | Hybrid (lexical + vector) retrieval, RRF-fused |
+| ✅ | Retrieval benchmark (Recall@k / MRR, vector vs. lexical vs. hybrid) |
 | ⬜ | Evidence-level citations in the UI |
 | ⬜ | Agentic underwriting workflow |
 | ⬜ | Human approval / review queue |
@@ -171,6 +172,7 @@ npm run build
 ```
 apps/api/     FastAPI backend — routes → services → repositories → models
 apps/web/     Next.js (App Router, TypeScript) frontend
+benchmarks/   Retrieval quality benchmark (Recall@k / MRR), runs against apps/api's own code
 docs/         Architecture decisions, rationale, verification log
 .github/      CI workflows
 docker-compose.yml
@@ -178,7 +180,7 @@ docker-compose.yml
 
 ## Verification & testing
 
-**Status:** Stage 10 (Hybrid retrieval) — done. 83 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
+**Status:** Stage 11 (Retrieval benchmark) — done. 83 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
 
 <details>
 <summary><strong>Full verification log — what was actually run, and seven real bugs it caught</strong></summary>
@@ -186,10 +188,11 @@ docker-compose.yml
 - Backend: `ruff`, `ruff format --check`, `mypy --strict`, and `pytest` all pass.
 - Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all pass.
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres (healthy), the API, and the web app end to end.
-- All five Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
+- All six Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
 - All 83 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, extraction tests (merge-order/provenance proof, failed-run field preservation) against both a fake and the real Ollama model, and a deterministic hybrid-retrieval test that hand-constructs embeddings so a lexically-relevant chunk is the *worst* possible vector match — proving the fusion, not just each half in isolation.
 - A live Docker Compose **hybrid search** check against the real embedding model — the strongest single proof point for retrieval: querying an exact policy number (`"ABC-99182-XY"`) correctly ranked the page containing it first (a lexical win — embedding models have little reason to weight an arbitrary alphanumeric code); querying a paraphrase with no literal word overlap (`"quarterly earnings increased"` vs. stored text `"revenue grew ... sales performance"`) still correctly ranked the revenue page first (a genuine semantic win, not keyword luck).
 - A live end-to-end **structured extraction** check against the real local LLM (not the fake): a realistic 2-page underwriting submission correctly yielded 3 of 5 target fields — broker name, business description, coverage limit — each verbatim and citing the exact correct source page, with zero hallucinated values, confirmed via `GET /submissions/{id}/extraction` and direct `psql` inspection of the persisted rows.
+- A real **retrieval benchmark** run (`benchmarks/retrieval/`, real Postgres + real embedding model, 12 hand-labeled queries): vector-only scored Recall@5 = 1.000 / MRR = 0.840, lexical-only 0.333 / 0.333 (only hitting where literal vocabulary actually overlapped — several queries share zero words with their relevant chunk), hybrid tied vector exactly. Reported honestly rather than reframed as a bigger win: RRF's floor is "as good as the better individual signal," and this benchmark's real, demonstrated value is the exact-identifier case already shown live above, not average-case superiority over a strong embedding model. The benchmark seeds its fixtures inside a transaction it always rolls back — verified via direct `psql` inspection to leave zero rows behind.
 - A live two-organisation attack test against the running Docker Compose stack (not the test suite): a real second organisation's session, holding real UUIDs from the first, was denied on every read/write path tried (submissions, documents, pages, content, search) — all `404`, no existence leak — while a search for the first org's exact text run inside the second org's own submission returned zero results.
 - Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
 - A live Docker Compose durability check — upload, download, restart the API container, download again — confirmed uploaded documents persist on the storage volume, not just in-process memory.
@@ -216,4 +219,4 @@ Full writeups of all seven: [`docs/architecture.md`](docs/architecture.md).
 
 ## Limitations
 
-This is Stage 10 of an intentionally staged 21-stage build. No reranking or retrieval benchmarking exists yet (Stage 11), and no agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). Hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) isn't tuned against this project's own data — there's no benchmark yet to tune against. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction only works end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.
+This is Stage 11 of an intentionally staged 21-stage build. No reranking exists yet, and no agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). The retrieval benchmark's 12 hand-labeled queries is a small, self-authored sample, not a large or adversarial evaluation set — it's a real, honest measurement tool, not a claim that these specific numbers generalize; hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) was deliberately left untuned against it for that reason. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction only works end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.

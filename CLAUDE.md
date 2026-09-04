@@ -132,5 +132,7 @@ ends with a stop point for explicit user go-ahead.
   alembic revision --autogenerate -m "message"`
 - Database reset (local only): `docker compose down -v db && docker compose
   up -d db && alembic upgrade head`
-- Benchmark: _TBD (Stage 11)_
+- Retrieval benchmark: `source apps/api/.venv/bin/activate && DATABASE_URL=...
+  SESSION_SECRET=... python3 -m benchmarks.retrieval.run` (from repo root;
+  see `benchmarks/README.md`)
 - Eval smoke test: _TBD (Stage 17)_

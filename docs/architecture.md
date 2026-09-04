@@ -933,6 +933,74 @@ hand-constructs embeddings so a lexically-relevant chunk is the *worst*
 possible vector match and a lexically-irrelevant chunk is the *best*
 possible vector match — hybrid correctly ranks the relevant one first.
 
+## Decision: Stage 11 retrieval benchmark — a top-level `benchmarks/` package, borrowing `apps/api`'s code
+
+**Context.** Stage 10's hybrid retrieval decision left the RRF constant
+(`k=60`) undefended by data — "no benchmark yet to tune against." A
+retrieval benchmark is also the first thing in this repo whose natural
+consumer is not `apps/api` itself, which is exactly the trigger condition
+the repository layout decision (Stage 0) set for creating a top-level
+package: `benchmarks/`, `infra/`, `docs/` at the root, `packages/*`
+"created only when a package has real shared consumers."
+
+**Decision.** `benchmarks/retrieval/` at the repo root, not a shared
+extracted `packages/retrieval` — it imports `apps/api`'s actual
+`RetrievalService`/`DocumentChunkRepository` directly via `sys.path`
+(run inside `apps/api`'s own virtualenv), rather than the repo layout
+decision's originally-imagined route of extracting shared code into its
+own installable package. There is still exactly one *runtime* consumer of
+retrieval logic (the API); a benchmark script borrowing that code to run
+offline doesn't need it published as a separate package — that refactor
+would touch a currently fully-green system for no benefit this stage
+actually needs. Revisit if a second real runtime consumer (e.g. an eval
+harness with its own deployment) ever appears.
+
+**Design — hand-labeled fixtures, not real ingestion.** The benchmark
+authors 12 chunks and 12 queries by hand (`benchmarks/retrieval/
+dataset.py`) rather than running real PDFs through `IngestionService`'s
+chunker. This measures retrieval quality specifically, not chunking
+quality — with hand-authored, single-fact chunks, "is this the right
+chunk" has one unambiguous answer per query, which running real chunking
+(with its own boundary decisions) would confound.
+
+**Design — seeds inside a rolled-back transaction.** The script opens one
+session, seeds fixture data (org/user/submission/document/pages/chunks
+with real embeddings), runs every query, then always rolls back —
+mirroring the test suite's own transactional-isolation pattern. Verified
+directly: ran the benchmark, then queried Postgres — zero rows from it
+persisted anywhere.
+
+**Real result — more nuanced than "hybrid always wins."** Against the
+real embedding model, vector-only already scored Recall@5 = 1.000, MRR =
+0.840 on this query set (mostly natural-language questions, e.g. "Who is
+the broker on this submission?"), while lexical-only scored Recall@5 =
+0.333 — it only found the relevant chunk when actual vocabulary
+overlapped (an exact policy number; a few queries that happened to reuse
+fixture words like "liability limit"). Several queries share **zero**
+literal words with their relevant chunk (e.g. "broker" never appears in
+the fixture text — it says "submitted by Meridian Risk Partners" — so
+lexical search has nothing to match, not a stemming failure). Hybrid tied
+vector exactly on both metrics: with vector already correct everywhere,
+RRF had nothing to correct, only to (in the few keyword-overlap cases)
+reinforce.
+
+This is a legitimate, honest empirical finding, not left as a "hybrid
+underdelivered" gap: hybrid never scored *worse* than the better
+individual signal — RRF's floor is exactly "as good as whichever method
+worked," and Stage 10's own targeted checks (a real live query for an
+exact policy number, and `tests/test_hybrid_retrieval.py`'s
+hand-constructed embeddings) already demonstrate the case hybrid exists
+for — a strong embedding model beating rare identifiers, not average-case
+natural-language questions. Twelve queries against one strong embedding
+model isn't a large or adversarial enough sample to conclude vector-only
+would suffice in general; it's a sample that happened to favor vector
+this time. **`_RRF_K` was left at 60**, unchanged — a 12-query benchmark
+isn't a sound basis for retuning a production constant either way; the
+sweep (`k` from 10 to 200) showed identical results at every tested
+value, which itself is unsurprising with such a small candidate pool
+size relative to `k` (see `benchmarks/README.md` for how to extend the
+dataset before drawing a stronger conclusion).
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1004,6 +1072,11 @@ built-in Postgres capability, and Reciprocal Rank Fusion is ~15 lines of
 plain Python (see the hybrid retrieval decision above for why a separate
 search engine wasn't justified).
 
+**Stage 11 (`benchmarks/`):** No new dependencies — the benchmark reuses
+`apps/api`'s already-installed dependencies (SQLAlchemy, asyncpg,
+fastembed) by running inside its virtualenv; no benchmarking framework
+needed for hand-computed Recall@k/MRR over 12 queries.
+
 ---
 
 ## Roadmap
@@ -1027,4 +1100,5 @@ each stage as it happens, plus a status line per stage below.
 | 8 | First milestone hardening | Done — added one full-journey integration test (`test_full_journey.py`); found and fixed a real bug where CI's Postgres service had never had migrations applied (silently erroring every DB-backed test touching `document_chunks` since Stage 6 — see below); added a CI job that builds and boots the full docker-compose stack and polls `/health` and the web landing page; 65/65 backend tests pass against real Postgres, including a from-scratch run seeded only by `docker compose up --build` (no manually-run migrations first); confirmed via GitHub Actions run 32779644596 — the first fully green CI run in this project's history (all three jobs: backend, docker-compose, frontend) |
 | 9 | Structured extraction | Done — `llm_gateway` abstraction + `OllamaGateway` (local, open-source `qwen2.5:3b`, no API key); per-chunk extraction of 5 underwriting fields with deterministic (never model-asserted) provenance to a source chunk/page; `ExtractionRun`/`ExtractedField` tables (migration 0005, verified via empty autogenerate diff); 82/82 backend tests pass, including real-model tests against Ollama (not just the fake gateway); real end-to-end run against a realistic 2-page submission correctly extracted 3/5 fields with zero hallucination and exactly-correct page provenance, confirmed via direct psql inspection; confirmed graceful (200, `status: "failed"`) behavior through the full docker-compose stack when the API container can't reach Ollama — see the LLM provider decision below for why Ollama isn't containerized |
 | 10 | Hybrid retrieval | Done — generated `search_vector` tsvector column + GIN index (migration 0006, verified via empty autogenerate diff); `DocumentChunkRepository.search_lexical` (websearch_to_tsquery + ts_rank_cd, tenant-scoped in SQL); `RetrievalService` now fuses vector + lexical results via Reciprocal Rank Fusion, `strategy` reports `"hybrid"`; 83/83 backend tests pass, including a deterministic proof (hand-constructed embeddings) that hybrid correctly ranks a lexically-relevant chunk above a semantically-closer-but-irrelevant one; live-verified against the real embedding model through Docker Compose on both an exact-identifier query (lexical wins) and a paraphrased query with no word overlap (vector wins) |
-| 11–21 | Retrieval benchmark → deployment/polish | Planned |
+| 11 | Retrieval benchmark | Done — `benchmarks/retrieval/` (hand-labeled 12-query/12-chunk fixture set, Recall@5/MRR for vector/lexical/hybrid, RRF-k sensitivity sweep); seeds and always rolls back its own transaction, verified via direct psql inspection to leave zero rows behind; real result against the real embedding model: vector-only already scored Recall@5=1.000/MRR=0.840 on this query set, hybrid tied it exactly (RRF's floor is "as good as the better individual signal," not a guaranteed uplift) — see the decision below for the honest reasoning and why `_RRF_K` was left unchanged |
+| 12–21 | Agentic workflows → deployment/polish | Planned |
