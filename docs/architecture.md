@@ -1001,6 +1001,75 @@ value, which itself is unsurprising with such a small candidate pool
 size relative to `k` (see `benchmarks/README.md` for how to extend the
 dataset before drawing a stronger conclusion).
 
+## Decision: Stage 12 agentic workflow — a fixed-sequence pipeline, not a dynamic tool-selection loop
+
+**Context.** "Agentic workflow" is usually taken to mean a ReAct-style
+loop where the model itself decides which tool to call next and when to
+stop. This project's own CLAUDE.md rules point the other way for a task
+like underwriting triage: "prefer deterministic logic over LLM calls
+wherever possible," and Stage 9 already demonstrated the local 3B model's
+real limits at complex structured reasoning (3 of 5 fields extracted
+correctly, honestly reported rather than hidden).
+
+**Decision.** `AgentService.run_triage` runs a **fixed sequence** — gather
+evidence, read extracted fields, apply deterministic rules
+(`app/agents/underwriting_rules.py`), then (only) ask the model to write
+a narrative summary of already-decided findings. The model never
+determines `recommendation`; `determine_recommendation` is plain Python
+over rule-generated severity flags. Every step is still logged as an
+`AgentToolCall` row (CLAUDE.md: "tool calls are typed, validated, and
+auditable"), satisfying the audit requirement without needing a pluggable
+tool-registry this project has no second consumer for. The underwriting
+rules themselves (missing named insured → high; missing coverage limit →
+medium; missing broker/effective date → low) are a first, deliberately
+simple set — a real starting point, not a placeholder, and easy to extend
+without touching the pipeline shape around them.
+
+**Why the LLM is never asked to decide.** The prompt handed to the model
+(`_build_summary_prompt`) explicitly instructs it to restate the given
+recommendation, not invent one — but the actual `AgentRun.recommendation`
+column is never populated from anything the model returns, so even if the
+model ignored that instruction in its prose, the stored, consequential
+field would be unaffected. Verified live: the real model's summary
+correctly echoed "refer" without being asked to compute it itself.
+
+**Decision — human approval is unconditional in this first version.**
+Every `AgentRun` has `requires_human_approval = True`; there is no
+`decline` recommendation the agent can produce (see
+`RecommendationType`'s docstring) and no code path where a run's output
+mutates `Submission.status` automatically — approving a run
+(`POST /agent-runs/{id}/approve`, admin-only) records who signed off and
+when, and nothing else. A human choosing to act on that recommendation
+does so through the existing `PATCH /submissions/{id}` endpoint,
+independently. This is a deliberately conservative first version of
+"consequential actions require... human approval" (CLAUDE.md) — a richer
+approval policy (auto-approve low-risk cases, wire recommendations to a
+real workflow state machine) is a real future decision, not one to back
+into now.
+
+**Real end-to-end verification**, native (non-Docker) flow, real
+`qwen2.5:3b`: uploaded a realistic 2-page submission, ran extraction (3 of
+5 fields, consistent with Stage 9's documented result), then ran triage —
+correctly flagged the missing named insured (high) and missing effective
+date (low), correctly recommended "refer," and the model's narrative
+summary accurately restated exactly the given facts and findings without
+inventing anything. Approved the run as admin; `approved_by_user_id`/
+`approved_at` populated correctly, confirmed via direct `psql`. A second
+organisation's session was denied `404` on both reading and approving the
+first org's run. Through the full `docker compose up --build` stack
+(Ollama unreachable from inside the `api` container, same constraint as
+Stage 9): the endpoint still returned `201` with `status: "failed"` and a
+clear error — the three deterministic steps ran and were logged correctly
+before the LLM call failed — no crash, no impact on any other route.
+
+**Bug found and fixed before it shipped:** `FakeLLMGateway` didn't wrap a
+Pydantic validation failure into `LLMGenerationError`, unlike the real
+`OllamaGateway` — latent because `ChunkExtraction`'s fields are all
+optional (so `model_validate({})` never raised), only surfacing once
+`TriageSummary.summary` (a required field) needed the same fallback path.
+Fixed so the fake matches the interface's actual contract
+(`generate_structured` never raises anything but `LLMGenerationError`).
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1077,6 +1146,11 @@ search engine wasn't justified).
 fastembed) by running inside its virtualenv; no benchmarking framework
 needed for hand-computed Recall@k/MRR over 12 queries.
 
+**Stage 12 backend:** No new dependencies — the triage pipeline reuses
+the existing `llm_gateway` abstraction and repositories; a fixed-sequence
+pipeline needs no agent framework (LangGraph, CrewAI, etc.), consistent
+with the decision above.
+
 ---
 
 ## Roadmap
@@ -1101,4 +1175,5 @@ each stage as it happens, plus a status line per stage below.
 | 9 | Structured extraction | Done — `llm_gateway` abstraction + `OllamaGateway` (local, open-source `qwen2.5:3b`, no API key); per-chunk extraction of 5 underwriting fields with deterministic (never model-asserted) provenance to a source chunk/page; `ExtractionRun`/`ExtractedField` tables (migration 0005, verified via empty autogenerate diff); 82/82 backend tests pass, including real-model tests against Ollama (not just the fake gateway); real end-to-end run against a realistic 2-page submission correctly extracted 3/5 fields with zero hallucination and exactly-correct page provenance, confirmed via direct psql inspection; confirmed graceful (200, `status: "failed"`) behavior through the full docker-compose stack when the API container can't reach Ollama — see the LLM provider decision below for why Ollama isn't containerized |
 | 10 | Hybrid retrieval | Done — generated `search_vector` tsvector column + GIN index (migration 0006, verified via empty autogenerate diff); `DocumentChunkRepository.search_lexical` (websearch_to_tsquery + ts_rank_cd, tenant-scoped in SQL); `RetrievalService` now fuses vector + lexical results via Reciprocal Rank Fusion, `strategy` reports `"hybrid"`; 83/83 backend tests pass, including a deterministic proof (hand-constructed embeddings) that hybrid correctly ranks a lexically-relevant chunk above a semantically-closer-but-irrelevant one; live-verified against the real embedding model through Docker Compose on both an exact-identifier query (lexical wins) and a paraphrased query with no word overlap (vector wins) |
 | 11 | Retrieval benchmark | Done — `benchmarks/retrieval/` (hand-labeled 12-query/12-chunk fixture set, Recall@5/MRR for vector/lexical/hybrid, RRF-k sensitivity sweep); seeds and always rolls back its own transaction, verified via direct psql inspection to leave zero rows behind; real result against the real embedding model: vector-only already scored Recall@5=1.000/MRR=0.840 on this query set, hybrid tied it exactly (RRF's floor is "as good as the better individual signal," not a guaranteed uplift) — see the decision below for the honest reasoning and why `_RRF_K` was left unchanged |
-| 12–21 | Agentic workflows → deployment/polish | Planned |
+| 12 | Agentic workflow (underwriting triage) | Done — `AgentService.run_triage`: a fixed-sequence pipeline (gather evidence → read extracted fields → apply deterministic rules → LLM-synthesized narrative summary only), not a dynamic tool-selection loop — see the decision below for why; deterministic rules in `app/agents/underwriting_rules.py` (never the model) decide `recommendation`; every step logged as an auditable `AgentToolCall`; human approval unconditional in this first version (`requires_human_approval` always true, no auto-effect on `Submission.status`); migration 0007 verified via empty autogenerate diff; 101/101 backend tests pass; real end-to-end run against the real `qwen2.5:3b` model correctly flagged missing fields, recommended "refer," and produced an accurate, grounded narrative summary — approval flow and cross-tenant denial both confirmed live; graceful `201`/`status: "failed"` degradation confirmed through the full docker-compose stack when Ollama is unreachable |
+| 13–21 | MCP tool integrations → deployment/polish | Planned |

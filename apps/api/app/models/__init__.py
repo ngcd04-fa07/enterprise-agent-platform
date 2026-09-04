@@ -2,6 +2,7 @@
 Alembic autogenerate and for tests that create the schema directly.
 """
 
+from app.models.agent import AgentRun, AgentRunStatus, AgentToolCall, RecommendationType
 from app.models.base import Base
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
@@ -14,6 +15,9 @@ from app.models.submission import Submission, SubmissionStatus
 from app.models.user import User
 
 __all__ = [
+    "AgentRun",
+    "AgentRunStatus",
+    "AgentToolCall",
     "Base",
     "Document",
     "DocumentChunk",
@@ -25,6 +29,7 @@ __all__ = [
     "MembershipRole",
     "Organisation",
     "OrganisationMembership",
+    "RecommendationType",
     "Session",
     "Submission",
     "SubmissionStatus",

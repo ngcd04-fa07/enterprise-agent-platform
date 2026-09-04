@@ -17,7 +17,7 @@ Fictional use case: commercial insurance underwriting document intelligence — 
 
 Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
 
-It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 11 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search, and a retrieval benchmark that measures it rather than taking it on faith. Agentic workflows, MCP tool integrations, and observability are the next stages.
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 12 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search backed by a real benchmark, and a first agentic workflow: automated underwriting triage with deterministic rules, an auditable pipeline, and mandatory human approval. MCP tool integrations and observability are the next stages.
 
 ## Table of contents
 
@@ -49,6 +49,7 @@ flowchart LR
         Ing["Ingestion\nparse → chunk → embed"]
         Ret["Retrieval\nvector + lexical, RRF-fused"]
         Ext["Extraction\nper-chunk structured output"]
+        Agt["Triage agent\nrules → LLM summary → human approval"]
     end
 
     subgraph Storage
@@ -70,6 +71,9 @@ flowchart LR
     Sub --> Ext
     Ext --> LLM
     Ext --> PG
+    Sub --> Agt
+    Agt --> LLM
+    Agt --> PG
 
     style PG fill:#4169E1,color:#fff
     style EMB fill:#009688,color:#fff
@@ -85,8 +89,9 @@ What this project is actually meant to demonstrate, beyond "it works":
 - **Tenant isolation enforced in SQL, not in the UI.** Every query touching submissions, documents, pages, or chunks filters `organisation_id` inside the `WHERE` clause — including both halves of the hybrid search (pgvector similarity and Postgres full-text). Backed by explicit cross-tenant-denial tests, not just code review.
 - **Provenance is structural, not cosmetic.** Every chunk carries `document_id` / `page_id` / `submission_id` / `organisation_id`; every search result can be traced back to an exact page.
 - **Security-conscious auth by default.** Argon2id password hashing, HMAC-hashed session tokens (never stored raw), `HttpOnly` cookies, double-submit CSRF on every state-changing route, server-derived organisation/role on every request — no client-supplied `organisation_id` or `role` is ever trusted.
-- **Deterministic-first.** Chunking, validation, and provenance are plain code, not LLM calls. Extraction provenance in particular is never *asked* of the model — each field is extracted one chunk at a time, so the source chunk is always the one actually being read, not a citation that needs a trust-but-verify check.
-- **Verification over vibes.** Every stage has been checked against a *real* Postgres instance, a *real* embedding model, and now a *real* local LLM — not just a green test suite. This discipline has caught seven real, reproducible bugs invisible to `mypy`/`ruff`/a passing local test run, plus honest reporting of a real model-reliability gap (a 3B local model correctly extracted 3 of 5 target fields from a test submission, with zero hallucinated values). Full writeups in [`docs/architecture.md`](docs/architecture.md).
+- **Deterministic-first.** Chunking, validation, and provenance are plain code, not LLM calls. Extraction provenance is never *asked* of the model — each field is extracted one chunk at a time, so the source chunk is always the one actually being read. The triage agent goes further: it's a fixed pipeline, not a model-driven tool-selection loop, and the actual `approve`/`refer` recommendation is always computed by plain-code rules — the model only narrates already-decided findings, and can't overrule them even if it tried.
+- **Consequential actions stay human-gated.** The triage agent's recommendation never auto-applies to a submission's status; every run requires an explicit, audited approval action, and there's no "decline" the agent can produce at all in this first version — only a human, through the ordinary submission-update path, makes that call.
+- **Verification over vibes.** Every stage has been checked against a *real* Postgres instance, a *real* embedding model, and a *real* local LLM — not just a green test suite. This discipline has caught seven real, reproducible bugs invisible to `mypy`/`ruff`/a passing local test run, plus honest reporting of real model-reliability limits (a 3B local model correctly extracted 3 of 5 target fields from a test submission, with zero hallucinated values, both in extraction and in the triage agent built on top of it). Full writeups in [`docs/architecture.md`](docs/architecture.md).
 - **No hidden provider coupling.** LLM and embedding calls are abstracted behind a gateway interface — swapping providers touches one file, not business logic.
 
 ## Capabilities
@@ -104,9 +109,9 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | ✅ | Structured extraction (local open-source LLM, per-chunk, deterministic provenance) |
 | ✅ | Hybrid (lexical + vector) retrieval, RRF-fused |
 | ✅ | Retrieval benchmark (Recall@k / MRR, vector vs. lexical vs. hybrid) |
+| ✅ | Agentic underwriting workflow (rules-driven triage, auditable pipeline) |
+| ✅ | Human approval / review queue (mandatory on every agent run) |
 | ⬜ | Evidence-level citations in the UI |
-| ⬜ | Agentic underwriting workflow |
-| ⬜ | Human approval / review queue |
 | ⬜ | MCP integrations |
 | ⬜ | Permission-aware tool calling |
 | ⬜ | AI tracing / observability |
@@ -180,19 +185,20 @@ docker-compose.yml
 
 ## Verification & testing
 
-**Status:** Stage 11 (Retrieval benchmark) — done. 83 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
+**Status:** Stage 12 (Agentic workflow) — done. 101 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → triage → approve → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
 
 <details>
-<summary><strong>Full verification log — what was actually run, and seven real bugs it caught</strong></summary>
+<summary><strong>Full verification log — what was actually run, and eight real bugs it caught</strong></summary>
 
 - Backend: `ruff`, `ruff format --check`, `mypy --strict`, and `pytest` all pass.
 - Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all pass.
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres (healthy), the API, and the web app end to end.
-- All six Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
-- All 83 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, extraction tests (merge-order/provenance proof, failed-run field preservation) against both a fake and the real Ollama model, and a deterministic hybrid-retrieval test that hand-constructs embeddings so a lexically-relevant chunk is the *worst* possible vector match — proving the fusion, not just each half in isolation.
+- All seven Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
+- All 101 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, extraction tests (merge-order/provenance proof, failed-run field preservation) against both a fake and the real Ollama model, a deterministic hybrid-retrieval test that hand-constructs embeddings so a lexically-relevant chunk is the *worst* possible vector match, pure unit tests for the deterministic triage rules, and agent-run tests covering recommendation logic, RBAC-gated approval, tenant isolation, and clean failure handling.
 - A live Docker Compose **hybrid search** check against the real embedding model — the strongest single proof point for retrieval: querying an exact policy number (`"ABC-99182-XY"`) correctly ranked the page containing it first (a lexical win — embedding models have little reason to weight an arbitrary alphanumeric code); querying a paraphrase with no literal word overlap (`"quarterly earnings increased"` vs. stored text `"revenue grew ... sales performance"`) still correctly ranked the revenue page first (a genuine semantic win, not keyword luck).
 - A live end-to-end **structured extraction** check against the real local LLM (not the fake): a realistic 2-page underwriting submission correctly yielded 3 of 5 target fields — broker name, business description, coverage limit — each verbatim and citing the exact correct source page, with zero hallucinated values, confirmed via `GET /submissions/{id}/extraction` and direct `psql` inspection of the persisted rows.
 - A real **retrieval benchmark** run (`benchmarks/retrieval/`, real Postgres + real embedding model, 12 hand-labeled queries): vector-only scored Recall@5 = 1.000 / MRR = 0.840, lexical-only 0.333 / 0.333 (only hitting where literal vocabulary actually overlapped — several queries share zero words with their relevant chunk), hybrid tied vector exactly. Reported honestly rather than reframed as a bigger win: RRF's floor is "as good as the better individual signal," and this benchmark's real, demonstrated value is the exact-identifier case already shown live above, not average-case superiority over a strong embedding model. The benchmark seeds its fixtures inside a transaction it always rolls back — verified via direct `psql` inspection to leave zero rows behind.
+- A live end-to-end **agentic triage** run against the real local LLM: uploaded a realistic submission, extracted 3 of 5 fields, then ran triage — correctly flagged the two missing fields (high/low severity), correctly recommended "refer" from plain-code rules alone, and the model's narrative summary accurately restated exactly the given facts without inventing anything or overriding the given recommendation. Approved the run as admin (`approved_by_user_id`/`approved_at` confirmed via `psql`); a second organisation was denied `404` on both reading and approving it. Through the full Docker Compose stack (Ollama unreachable from inside the container, same constraint as extraction), the endpoint still returned a clean `201` with `status: "failed"` — no crash, no impact on any other route.
 - A live two-organisation attack test against the running Docker Compose stack (not the test suite): a real second organisation's session, holding real UUIDs from the first, was denied on every read/write path tried (submissions, documents, pages, content, search) — all `404`, no existence leak — while a search for the first org's exact text run inside the second org's own submission returned zero results.
 - Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
 - A live Docker Compose durability check — upload, download, restart the API container, download again — confirmed uploaded documents persist on the storage volume, not just in-process memory.
@@ -207,8 +213,9 @@ docker-compose.yml
 5. CI's Postgres service never had migrations applied, so the `vector` extension didn't exist and every chunk-related test had been silently erroring in CI since Stage 6 — invisible locally because every manual verification ran against a Postgres that already had migrations applied.
 6. A failed document ingestion could leave partially-persisted `DocumentPage`/`DocumentChunk` rows committed alongside the `failed` status — reproduced directly, fixed with a SAVEPOINT around the parse/chunk/embed block.
 7. A file could be orphaned on disk if the database row failed to persist after a successful storage write — reproduced directly (forced an FK violation), fixed with a compensating delete.
+8. `FakeLLMGateway` (test infrastructure) didn't wrap a schema-validation failure into `LLMGenerationError` the way the real `OllamaGateway` does — latent since extraction's schema has no required fields, only surfacing once the triage agent's summary schema needed the same fallback path. Fixed to match the interface's actual contract before it could mask a real failure-handling bug elsewhere.
 
-Full writeups of all seven: [`docs/architecture.md`](docs/architecture.md).
+Full writeups of all eight: [`docs/architecture.md`](docs/architecture.md).
 
 </details>
 
@@ -219,4 +226,4 @@ Full writeups of all seven: [`docs/architecture.md`](docs/architecture.md).
 
 ## Limitations
 
-This is Stage 11 of an intentionally staged 21-stage build. No reranking exists yet, and no agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). The retrieval benchmark's 12 hand-labeled queries is a small, self-authored sample, not a large or adversarial evaluation set — it's a real, honest measurement tool, not a claim that these specific numbers generalize; hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) was deliberately left untuned against it for that reason. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction only works end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.
+This is Stage 12 of an intentionally staged 21-stage build. No reranking exists yet, and no MCP tool integrations or AI tracing/observability exist yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). The retrieval benchmark's 12 hand-labeled queries is a small, self-authored sample, not a large or adversarial evaluation set — it's a real, honest measurement tool, not a claim that these specific numbers generalize; hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) was deliberately left untuned against it for that reason. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. The triage agent is a fixed pipeline with a first, deliberately simple rule set (four checks), always recommends "approve" or "refer" and never "decline," and always requires human approval with no automatic effect on `Submission.status` — a conservative first version by design, not a placeholder awaiting a missing piece. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction and triage only work end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.

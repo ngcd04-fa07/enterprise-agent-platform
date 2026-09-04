@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from app.api.routes.agents import router as agents_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.documents import router as documents_router
 from app.api.routes.extraction import router as extraction_router
@@ -69,3 +70,4 @@ app.include_router(submissions_router)
 app.include_router(documents_router)
 app.include_router(retrieval_router)
 app.include_router(extraction_router)
+app.include_router(agents_router)
