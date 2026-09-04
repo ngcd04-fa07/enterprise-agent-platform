@@ -13,7 +13,14 @@ class SearchResult(BaseModel):
     document_id: uuid.UUID
     page_number: int
     text: str
-    score: float
+    score: float = Field(
+        description=(
+            "A Reciprocal Rank Fusion score combining semantic (vector) and "
+            "lexical (full-text) search — see RetrievalService. Meaningful "
+            "only for ranking within one query's results, not as a 0..1 "
+            "relevance measure and not comparable across queries."
+        )
+    )
 
 
 class SearchResponse(BaseModel):

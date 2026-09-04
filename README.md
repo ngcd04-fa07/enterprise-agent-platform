@@ -17,7 +17,7 @@ Fictional use case: commercial insurance underwriting document intelligence — 
 
 Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
 
-It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 9 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, now with the first real LLM integration: schema-validated structured extraction from a local, open-source model. Hybrid retrieval, agentic workflows, MCP tool integrations, and observability are the next stages.
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 10 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, and hybrid (semantic + lexical) search. Retrieval benchmarking, agentic workflows, MCP tool integrations, and observability are the next stages.
 
 ## Table of contents
 
@@ -47,12 +47,12 @@ flowchart LR
         Auth["Auth / RBAC\ncookie session + CSRF"]
         Sub["Submissions"]
         Ing["Ingestion\nparse → chunk → embed"]
-        Ret["Retrieval\nvector search"]
+        Ret["Retrieval\nvector + lexical, RRF-fused"]
         Ext["Extraction\nper-chunk structured output"]
     end
 
     subgraph Storage
-        PG[("PostgreSQL\n+ pgvector (HNSW)")]
+        PG[("PostgreSQL\n+ pgvector (HNSW)\n+ full-text (GIN)")]
         FS[("Object storage\n(filesystem, swappable)")]
         EMB["Local embedding model\n(fastembed, no API key)"]
         LLM["Local LLM via Ollama\n(qwen2.5:3b, no API key)"]
@@ -82,7 +82,7 @@ Every arrow into Postgres carries `organisation_id` scoping enforced at the **re
 
 What this project is actually meant to demonstrate, beyond "it works":
 
-- **Tenant isolation enforced in SQL, not in the UI.** Every query touching submissions, documents, pages, or vector chunks filters `organisation_id` inside the `WHERE` clause — including the pgvector similarity search itself. Backed by explicit cross-tenant-denial tests, not just code review.
+- **Tenant isolation enforced in SQL, not in the UI.** Every query touching submissions, documents, pages, or chunks filters `organisation_id` inside the `WHERE` clause — including both halves of the hybrid search (pgvector similarity and Postgres full-text). Backed by explicit cross-tenant-denial tests, not just code review.
 - **Provenance is structural, not cosmetic.** Every chunk carries `document_id` / `page_id` / `submission_id` / `organisation_id`; every search result can be traced back to an exact page.
 - **Security-conscious auth by default.** Argon2id password hashing, HMAC-hashed session tokens (never stored raw), `HttpOnly` cookies, double-submit CSRF on every state-changing route, server-derived organisation/role on every request — no client-supplied `organisation_id` or `role` is ever trusted.
 - **Deterministic-first.** Chunking, validation, and provenance are plain code, not LLM calls. Extraction provenance in particular is never *asked* of the model — each field is extracted one chunk at a time, so the source chunk is always the one actually being read, not a citation that needs a trust-but-verify check.
@@ -102,7 +102,7 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | ✅ | End-to-end frontend (register, login, submissions, upload, search) |
 | ✅ | CI/CD (lint, types, tests, Docker build & boot, on every push) |
 | ✅ | Structured extraction (local open-source LLM, per-chunk, deterministic provenance) |
-| ⬜ | Hybrid (lexical + vector) retrieval |
+| ✅ | Hybrid (lexical + vector) retrieval, RRF-fused |
 | ⬜ | Evidence-level citations in the UI |
 | ⬜ | Agentic underwriting workflow |
 | ⬜ | Human approval / review queue |
@@ -117,7 +117,7 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | Layer | Choice | Why |
 |---|---|---|
 | Backend | FastAPI, Pydantic v2, SQLAlchemy 2.x (async) | Typed end-to-end, async-native, no framework magic hiding the SQL |
-| Database | PostgreSQL + pgvector (HNSW, cosine) | One source of truth for relational *and* vector data — no separate vector DB to keep in sync |
+| Database | PostgreSQL + pgvector (HNSW, cosine) + full-text (GIN) | One source of truth for relational, vector, *and* lexical search — no separate search engine to keep in sync |
 | Embeddings | `fastembed` (local ONNX, `bge-small-en-v1.5`) | Real semantic search with zero API key / external dependency |
 | LLM (structured extraction) | Ollama, `qwen2.5:3b` (local, open-source) | Real schema-validated generation with zero API key / per-call cost |
 | Auth | Argon2id + HMAC-hashed cookie sessions + CSRF | No JWT-in-localStorage XSS surface; server-side revocation |
@@ -178,7 +178,7 @@ docker-compose.yml
 
 ## Verification & testing
 
-**Status:** Stage 9 (Structured extraction) — done. 82 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → search → extract → logout) has been walked both by automated tests and live against a real local LLM. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
+**Status:** Stage 10 (Hybrid retrieval) — done. 83 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
 
 <details>
 <summary><strong>Full verification log — what was actually run, and seven real bugs it caught</strong></summary>
@@ -187,8 +187,8 @@ docker-compose.yml
 - Frontend: `npm run lint`, `npm run typecheck`, and `npm run build` all pass.
 - Full Docker Compose stack: `docker compose up --build` brings up Postgres (healthy), the API, and the web app end to end.
 - All five Alembic migrations apply cleanly against real Postgres, and `alembic revision --autogenerate` afterward produces an empty diff every time — proof the hand-written migrations exactly match the SQLAlchemy models.
-- All 82 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, search tests against the real embedding model, and extraction tests (merge-order/provenance proof, failed-run field preservation) against both a fake and the real Ollama model.
-- A live Docker Compose **semantic** search check — not exact-text matching — is the strongest single proof point for retrieval: querying *"how much did revenue grow"* against three unrelated sentences correctly ranked the revenue sentence highest (score 0.73 vs. 0.63 and 0.48), using the real local embedding model against real pgvector.
+- All 83 backend tests pass against real Postgres, including cross-tenant-denial tests at both the HTTP layer and the repository layer (two real organisations' data present simultaneously, proving the SQL filter itself — not just an earlier ownership check), an RBAC test proving a viewer role is rejected from write endpoints, document upload/download validation tests, PDF ingestion tests (per-page extraction, chunk provenance, graceful failure on an unparseable PDF, atomicity on partial failure), search bounding/validation tests, extraction tests (merge-order/provenance proof, failed-run field preservation) against both a fake and the real Ollama model, and a deterministic hybrid-retrieval test that hand-constructs embeddings so a lexically-relevant chunk is the *worst* possible vector match — proving the fusion, not just each half in isolation.
+- A live Docker Compose **hybrid search** check against the real embedding model — the strongest single proof point for retrieval: querying an exact policy number (`"ABC-99182-XY"`) correctly ranked the page containing it first (a lexical win — embedding models have little reason to weight an arbitrary alphanumeric code); querying a paraphrase with no literal word overlap (`"quarterly earnings increased"` vs. stored text `"revenue grew ... sales performance"`) still correctly ranked the revenue page first (a genuine semantic win, not keyword luck).
 - A live end-to-end **structured extraction** check against the real local LLM (not the fake): a realistic 2-page underwriting submission correctly yielded 3 of 5 target fields — broker name, business description, coverage limit — each verbatim and citing the exact correct source page, with zero hallucinated values, confirmed via `GET /submissions/{id}/extraction` and direct `psql` inspection of the persisted rows.
 - A live two-organisation attack test against the running Docker Compose stack (not the test suite): a real second organisation's session, holding real UUIDs from the first, was denied on every read/write path tried (submissions, documents, pages, content, search) — all `404`, no existence leak — while a search for the first org's exact text run inside the second org's own submission returned zero results.
 - Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
@@ -216,4 +216,4 @@ Full writeups of all seven: [`docs/architecture.md`](docs/architecture.md).
 
 ## Limitations
 
-This is Stage 9 of an intentionally staged 21-stage build. No lexical/hybrid retrieval or reranking exists yet (Stage 10), and no agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction only works end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.
+This is Stage 10 of an intentionally staged 21-stage build. No reranking or retrieval benchmarking exists yet (Stage 11), and no agentic underwriting workflow exists yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). Hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) isn't tuned against this project's own data — there's no benchmark yet to tune against. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction only works end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.

@@ -123,10 +123,12 @@ async def test_document_page_repository_excludes_other_org_pages_when_both_prese
 async def test_document_chunk_repository_excludes_other_org_chunks_when_both_present(
     db_session: AsyncSession,
 ) -> None:
-    """Same as above but for DocumentChunkRepository — both list_for_document
-    and, critically, search_similar (the pgvector query): with both orgs'
-    embeddings present in the table, org A's search must never return org
-    B's chunk, even though org B's chunk is the closer vector match.
+    """Same as above but for DocumentChunkRepository — list_for_document,
+    search_similar (the pgvector query), and search_lexical (the full-text
+    query, Stage 10): with both orgs' data present in the same table, org
+    A's queries must never return org B's chunk, even when org B's chunk
+    is the closer vector match (search_similar) or shares the exact
+    search keyword (search_lexical, both chunks' text contains "chunk").
     """
     org_a, document_a = await _make_org_with_document(
         db_session, org_name="Chunk Org A", user_email="chunka@example.com"
@@ -178,3 +180,8 @@ async def test_document_chunk_repository_excludes_other_org_chunks_when_both_pre
         organisation_id=org_a.id, query_embedding=_fake_vector(2), limit=10
     )
     assert [chunk.text for chunk, _page_number, _distance in org_a_results] == ["Org A chunk"]
+
+    org_a_lexical_results = await chunks.search_lexical(
+        organisation_id=org_a.id, query="chunk", limit=10
+    )
+    assert [chunk.text for chunk, _page_number, _rank in org_a_lexical_results] == ["Org A chunk"]

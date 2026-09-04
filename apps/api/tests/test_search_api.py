@@ -47,9 +47,13 @@ async def _upload(
 
 async def test_search_returns_exact_text_match_as_top_result(client: AsyncClient) -> None:
     """FakeEmbeddingProvider is deterministic per exact text, so querying
-    with text identical to a stored chunk gives distance 0 / score 1.0 —
-    a clean, deterministic wiring assertion without needing real semantic
-    embeddings (those are covered in test_fastembed_provider.py).
+    with text identical to a stored chunk gives distance 0 (vector rank 1)
+    — and the same query also matches it lexically (rank 1) since the
+    words are identical. With a single chunk in the corpus, it's rank 1 in
+    both underlying searches, so the fused RRF score is exactly
+    2 * 1/(60+1) — a clean, deterministic wiring assertion for hybrid
+    retrieval without needing real semantic embeddings (those are covered
+    in test_fastembed_provider.py).
     """
     auth_body = await _register(client, email="s1@example.com", organisation_name="Acme")
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
@@ -65,12 +69,12 @@ async def test_search_returns_exact_text_match_as_top_result(client: AsyncClient
 
     assert response.status_code == 200
     body = response.json()
-    assert body["strategy"] == "vector"
+    assert body["strategy"] == "hybrid"
     assert len(body["results"]) == 1
     top = body["results"][0]
     assert "quick brown fox" in top["text"]
     assert top["page_number"] == 1
-    assert top["score"] == pytest.approx(1.0, abs=1e-6)
+    assert top["score"] == pytest.approx(2 / 61, abs=1e-6)
 
 
 async def test_search_with_no_documents_returns_empty_results(client: AsyncClient) -> None:

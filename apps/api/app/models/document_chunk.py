@@ -2,6 +2,7 @@ import uuid
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -34,6 +35,10 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # Matches the GIN index hand-created in migration 0006, same reason as
+        # the HNSW index above — declared on the model so autogenerate's diff
+        # stays empty instead of proposing to drop it as unmanaged.
+        sa.Index("ix_document_chunks_search_vector_gin", "search_vector", postgresql_using="gin"),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
@@ -54,4 +59,12 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     end_char: Mapped[int] = mapped_column(sa.Integer)
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIMENSION), nullable=True
+    )
+    # Postgres-generated (STORED, always kept in sync with `text` by the
+    # database itself — no application code writes this) column backing
+    # lexical/full-text search, the other half of Stage 10's hybrid
+    # retrieval. See docs/architecture.md, hybrid retrieval decision, for
+    # why Postgres full-text search over a separate search engine.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR, sa.Computed("to_tsvector('english', text)", persisted=True), nullable=False
     )

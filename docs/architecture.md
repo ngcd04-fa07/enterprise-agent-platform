@@ -870,6 +870,69 @@ for those fields rather than inventing a wrong value, which is the
 correct failure mode for an underwriting tool (silence, not confident
 fabrication).
 
+## Decision: Stage 10 hybrid retrieval — Postgres full-text + RRF, not a separate search engine
+
+**Context.** Stage 6 shipped pure vector (semantic) search. Vector search
+alone is known to underperform on exact identifiers, codes, and rare
+terms (policy numbers, SKUs, proper nouns) that an embedding model has no
+particular reason to weight — the classic justification for hybrid
+retrieval.
+
+**Options considered.** A dedicated search engine (Elasticsearch/
+OpenSearch/Meilisearch) vs. Postgres's built-in full-text search
+(`tsvector`/`tsquery`, GIN index). CLAUDE.md is explicit that PostgreSQL
+is the source of truth and new infrastructure needs a concrete technical
+reason — running a second search system to index the same `text` column
+already sitting in Postgres would be exactly the kind of premature
+infrastructure the project's architectural principles rule out. Postgres
+full-text search isn't as tunable as a dedicated engine, but this
+project's scale (a handful of documents per submission, not a
+web-search-sized corpus) doesn't come close to needing that.
+
+**Decision.** A generated, always-in-sync `search_vector` column
+(`GENERATED ALWAYS AS (to_tsvector('english', text)) STORED`, migration
+0006) with a GIN index, queried via `websearch_to_tsquery` (accepts
+natural search-box syntax: quoted phrases, `-` to exclude, implicit AND)
+and ranked with `ts_rank_cd`. Merged with the existing pgvector cosine
+search via **Reciprocal Rank Fusion** (RRF): each chunk's final score is
+the sum of `1/(60 + rank)` across whichever of the two ranked lists it
+appears in (a chunk found by only one method still contributes; a chunk
+found by both, even at different ranks, accumulates both). RRF was chosen
+over a weighted linear blend of the two scores because cosine distance
+and `ts_rank_cd` are on incomparable scales — a weighted sum would need
+an arbitrary normalization step to mean anything, where RRF only needs
+each list's *rank order*, which both already produce natively.
+
+**Consequence — the API's `score` field changed meaning.** It's no
+longer `1 - cosine_distance` (a 0..1 relevance-ish number); it's now an
+RRF value, meaningful only for ranking within one query's results, not
+comparable across queries or interpretable as a percentage. Documented on
+the `SearchResult.score` field itself, and `strategy` now reports
+`"hybrid"` instead of `"vector"`.
+
+**Consequence — each underlying search over-fetches.** Both
+`search_similar` and `search_lexical` are called with a candidate pool
+larger than the final result limit (`max(limit * 3, 20)`) before RRF
+trims to `limit` — with only `limit` candidates from each side, a chunk
+found by just one method could never outscore one found by both,
+regardless of how strong its individual rank was, which would silently
+defeat the point of fusing two signals.
+
+**Real verification.** Against the live Docker Compose stack with the
+real embedding model (not the fake): a 3-page submission with a revenue
+sentence, a page containing a specific policy number
+("ABC-99182-XY"), and an irrelevant distractor. Querying the exact policy
+number ranked that page first (lexical match — an embedding model has
+little reason to weight an arbitrary alphanumeric code highly). Querying
+a paraphrase with no literal word overlap ("quarterly earnings
+increased" vs. stored text "revenue grew ... sales performance") still
+correctly ranked the revenue page first — proving the vector half is
+doing genuine semantic work, not just falling back to keyword overlap.
+Also proven deterministically in `tests/test_hybrid_retrieval.py`, which
+hand-constructs embeddings so a lexically-relevant chunk is the *worst*
+possible vector match and a lexically-irrelevant chunk is the *best*
+possible vector match — hybrid correctly ranks the relevant one first.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -935,6 +998,12 @@ just tests. No new package for the LLM itself: Ollama is a local process
 called over plain HTTP, so there's no Python SDK to add (unlike
 `fastembed`, which runs the model in-process).
 
+**Stage 10 backend:** No new dependencies — full-text search
+(`to_tsvector`/`websearch_to_tsquery`/`ts_rank_cd`, GIN index) is a
+built-in Postgres capability, and Reciprocal Rank Fusion is ~15 lines of
+plain Python (see the hybrid retrieval decision above for why a separate
+search engine wasn't justified).
+
 ---
 
 ## Roadmap
@@ -957,4 +1026,5 @@ each stage as it happens, plus a status line per stage below.
 | 7 | Minimal frontend | Done — frontend lint/typecheck/build pass; backend 64/64 tests pass against real Postgres; full docker-compose stack verified end-to-end via a real browser walkthrough (register → create submission → upload a real PDF → status reaches "ready" with no refresh → semantic, non-exact-match search returns correctly-ranked results with page/score → logout → redirect to `/login` → direct navigation to a protected route while logged out redirects, no stale data); a real bug found and fixed (Next.js bakes the rewrites() proxy destination at build time, so the web Dockerfile needed `API_ORIGIN` as a build arg, not just a runtime env var — see below); a missing ESLint `ignores` block (linting `next-env.d.ts`) also fixed |
 | 8 | First milestone hardening | Done — added one full-journey integration test (`test_full_journey.py`); found and fixed a real bug where CI's Postgres service had never had migrations applied (silently erroring every DB-backed test touching `document_chunks` since Stage 6 — see below); added a CI job that builds and boots the full docker-compose stack and polls `/health` and the web landing page; 65/65 backend tests pass against real Postgres, including a from-scratch run seeded only by `docker compose up --build` (no manually-run migrations first); confirmed via GitHub Actions run 32779644596 — the first fully green CI run in this project's history (all three jobs: backend, docker-compose, frontend) |
 | 9 | Structured extraction | Done — `llm_gateway` abstraction + `OllamaGateway` (local, open-source `qwen2.5:3b`, no API key); per-chunk extraction of 5 underwriting fields with deterministic (never model-asserted) provenance to a source chunk/page; `ExtractionRun`/`ExtractedField` tables (migration 0005, verified via empty autogenerate diff); 82/82 backend tests pass, including real-model tests against Ollama (not just the fake gateway); real end-to-end run against a realistic 2-page submission correctly extracted 3/5 fields with zero hallucination and exactly-correct page provenance, confirmed via direct psql inspection; confirmed graceful (200, `status: "failed"`) behavior through the full docker-compose stack when the API container can't reach Ollama — see the LLM provider decision below for why Ollama isn't containerized |
-| 10–21 | Hybrid retrieval → deployment/polish | Planned |
+| 10 | Hybrid retrieval | Done — generated `search_vector` tsvector column + GIN index (migration 0006, verified via empty autogenerate diff); `DocumentChunkRepository.search_lexical` (websearch_to_tsquery + ts_rank_cd, tenant-scoped in SQL); `RetrievalService` now fuses vector + lexical results via Reciprocal Rank Fusion, `strategy` reports `"hybrid"`; 83/83 backend tests pass, including a deterministic proof (hand-constructed embeddings) that hybrid correctly ranks a lexically-relevant chunk above a semantically-closer-but-irrelevant one; live-verified against the real embedding model through Docker Compose on both an exact-identifier query (lexical wins) and a paraphrased query with no word overlap (vector wins) |
+| 11–21 | Retrieval benchmark → deployment/polish | Planned |

@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document_chunk import DocumentChunk
@@ -101,3 +101,39 @@ class DocumentChunkRepository:
 
         result = await self._session.execute(stmt)
         return [(chunk, page_number, float(dist)) for chunk, page_number, dist in result.all()]
+
+    async def search_lexical(
+        self,
+        *,
+        organisation_id: uuid.UUID,
+        query: str,
+        limit: int = 10,
+        submission_id: uuid.UUID | None = None,
+    ) -> list[tuple[DocumentChunk, int, float]]:
+        """Full-text (keyword) search over the generated `search_vector`
+        column, tenant-scoped. Returns (chunk, page_number, rank) triples
+        ordered by descending rank (best match first) — the other half of
+        Stage 10's hybrid retrieval alongside search_similar; see
+        RetrievalService for how the two are merged.
+
+        websearch_to_tsquery accepts natural, user-typed search-box syntax
+        (quoted phrases, `-` to exclude, implicit AND between words) rather
+        than requiring Postgres's stricter tsquery operator syntax.
+        """
+        ts_query = func.websearch_to_tsquery("english", query)
+        rank = func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        stmt = (
+            select(DocumentChunk, DocumentPage.page_number, rank.label("rank"))
+            .join(DocumentPage, DocumentChunk.page_id == DocumentPage.id)
+            .where(
+                DocumentChunk.organisation_id == organisation_id,
+                DocumentChunk.search_vector.op("@@")(ts_query),
+            )
+            .order_by(rank.desc())
+            .limit(limit)
+        )
+        if submission_id is not None:
+            stmt = stmt.where(DocumentChunk.submission_id == submission_id)
+
+        result = await self._session.execute(stmt)
+        return [(chunk, page_number, float(r)) for chunk, page_number, r in result.all()]

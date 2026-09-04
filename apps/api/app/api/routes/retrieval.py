@@ -48,10 +48,10 @@ async def search_submission(
                 document_id=chunk.document_id,
                 page_number=page_number,
                 text=chunk.text,
-                score=1.0 - distance,
+                score=score,
             )
-            for chunk, page_number, distance in results
+            for chunk, page_number, score in results
         ],
-        strategy="vector",
+        strategy="hybrid",
         latency_ms=latency_ms,
     )
