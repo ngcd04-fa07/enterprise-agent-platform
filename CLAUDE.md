@@ -142,4 +142,7 @@ ends with a stop point for explicit user go-ahead.
 - MCP server: get a session with `python3 mcp_server/login.py --email
   you@example.com`, then run `mcp_server/server.py` with the printed
   `SESSION_TOKEN`/`CSRF_TOKEN` set — see `mcp_server/README.md`
+- AI call trace report: `cd apps/api && DATABASE_URL=... SESSION_SECRET=...
+  python3 scripts/ai_traces_report.py` — count/avg latency/error rate per
+  call type, plus recent failures
 - Eval smoke test: _TBD (Stage 17)_

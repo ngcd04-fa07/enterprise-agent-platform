@@ -1134,6 +1134,76 @@ attempting to read or search the first organisation's submission by id —
 inherited automatically from the underlying API's existing tenant
 scoping, with no MCP-specific isolation code to get wrong.
 
+## Decision: Stage 14 AI tracing — a transparent wrapper layer, infrastructure-scoped, not tenant-exposed
+
+**Context.** CLAUDE.md says "AI runs (agent runs, model calls, retrieval
+calls, tool calls) are traced and persisted." `ExtractionRun`/`AgentRun`
+(Stages 9/12) already cover the business-level runs, but the individual
+calls underneath them — every LLM generation, every embedding call, every
+retrieval search — had no tracing of their own before this stage; nothing
+recorded latency, provider/model, or failure independent of whichever
+feature happened to be calling in.
+
+**Decision.** `TracingLLMGateway`/`TracingEmbeddingProvider`
+(`app/observability/`) wrap the real `OllamaGateway`/`FastEmbedProvider`
+behind the same `LLMGateway`/`EmbeddingProvider` interfaces, applied once
+in the two factory functions (`get_llm_gateway`, `get_embedding_provider`)
+— every existing caller (extraction, triage, ingestion, retrieval) is
+traced automatically with zero code changes anywhere else, because they
+already depend only on the interface, never the concrete class. Retrieval
+search doesn't route through either provider abstraction on its own (it
+calls `embed_query`, which *is* traced, plus two repository queries,
+which aren't behind any shared abstraction) — `RetrievalService.search`
+records an explicit `retrieval_search` trace around the whole operation
+for that reason, the one place tracing isn't "free" from wrapping a
+factory.
+
+**Decision — trace writes use their own session, independent of the
+calling request's transaction.** `TracingLLMGateway`/
+`TracingEmbeddingProvider` are constructed once as process-wide
+singletons (same `@lru_cache` pattern as before) with no request-scoped
+session available at call time — there's no session to reuse even if
+this weren't otherwise the right call. And even in `RetrievalService`,
+which does have one: a trace should survive regardless of whether the
+surrounding business transaction later rolls back — the fact a call was
+attempted, and what happened, is exactly what you want preserved when
+something else in the request fails. `record_ai_call`
+(`app/observability/tracer.py`) opens a short session via the same
+`get_sessionmaker()` every other DB access already uses, commits
+immediately, and never raises — a broken tracer must never break the AI
+call it's describing (same boundary-call pattern as `ping_database`).
+
+**Decision — no organisation_id, and no new HTTP endpoint yet.**
+`ai_call_traces` is deliberately un-scoped to any tenant: this is
+operational/SRE-facing data (model health, latency, error rate) analogous
+to a server log line, not tenant business data, and the provider-
+abstraction layer these calls happen at has no tenant context to attach
+even if it were wanted — `LLMGateway`/`EmbeddingProvider` are intentionally
+tenant-agnostic ML-provider interfaces. Exposing this data through the
+tenant-facing API would need a cross-organisation "platform operator"
+role that doesn't exist anywhere in this app's RBAC model (`admin` is
+scoped to one organisation, same as every other role) — inventing one
+just to expose a trace-viewer is a bigger, separate decision than "add
+tracing," and not one to make by accident as a side effect of this stage.
+For now, this data is visible via direct `psql` queries and
+`apps/api/scripts/ai_traces_report.py` (count/avg-latency/error-rate per
+call type, plus recent failures) — a real, runnable tool, not a
+placeholder, just not a network-exposed one yet.
+
+**Real verification.** Ran a full journey (register → upload → search →
+extract → triage) against the real embedding model and real `qwen2.5:3b`,
+then confirmed via both `psql` and the report script: one
+`embed_documents` trace (ingestion), one `embed_query` and one
+`retrieval_search` trace (search), two `llm_generate` traces (extraction
++ triage synthesis) — every call accounted for, correct provider/model,
+0% error rate. Then, through the full Docker Compose stack (Ollama
+unreachable from inside the `api` container — the same constraint
+extraction and triage already document), triggered a real triage failure
+and confirmed a `llm_generate` trace was recorded with `status: failure`
+and the full error message, both via `psql` and via the report script's
+"most recent failures" section, correctly showing a 100% error rate for
+that call type.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1222,6 +1292,11 @@ used elsewhere in the project for the same reason: a real async HTTP
 client). Its own minimal `pyproject.toml`/venv, not part of `apps/api`'s
 dependencies — see the decision above for why.
 
+**Stage 14 backend:** No new dependencies — tracing is plain Python
+(wrapper classes around existing interfaces) and the report script uses
+SQLAlchemy already in `apps/api`'s dependencies; no observability/APM
+vendor SDK needed for a local-first, single-process app at this stage.
+
 ---
 
 ## Roadmap
@@ -1248,4 +1323,5 @@ each stage as it happens, plus a status line per stage below.
 | 11 | Retrieval benchmark | Done — `benchmarks/retrieval/` (hand-labeled 12-query/12-chunk fixture set, Recall@5/MRR for vector/lexical/hybrid, RRF-k sensitivity sweep); seeds and always rolls back its own transaction, verified via direct psql inspection to leave zero rows behind; real result against the real embedding model: vector-only already scored Recall@5=1.000/MRR=0.840 on this query set, hybrid tied it exactly (RRF's floor is "as good as the better individual signal," not a guaranteed uplift) — see the decision below for the honest reasoning and why `_RRF_K` was left unchanged |
 | 12 | Agentic workflow (underwriting triage) | Done — `AgentService.run_triage`: a fixed-sequence pipeline (gather evidence → read extracted fields → apply deterministic rules → LLM-synthesized narrative summary only), not a dynamic tool-selection loop — see the decision below for why; deterministic rules in `app/agents/underwriting_rules.py` (never the model) decide `recommendation`; every step logged as an auditable `AgentToolCall`; human approval unconditional in this first version (`requires_human_approval` always true, no auto-effect on `Submission.status`); migration 0007 verified via empty autogenerate diff; 101/101 backend tests pass; real end-to-end run against the real `qwen2.5:3b` model correctly flagged missing fields, recommended "refer," and produced an accurate, grounded narrative summary — approval flow and cross-tenant denial both confirmed live; graceful `201`/`status: "failed"` degradation confirmed through the full docker-compose stack when Ollama is unreachable |
 | 13 | MCP tool integrations | Done — `mcp_server/`, a standalone MCP server (stdio transport, own minimal venv) exposing 8 tools as thin wrappers over the real HTTP API with a real session from a real login — see the decision below for why a server (not the agent becoming an MCP client), and why proxying real HTTP calls rather than a new auth mechanism. 7/7 unit tests pass against a mocked transport; real end-to-end verification against a live API and the real `mcp` Python client library covered every tool, a deliberate not-found failure (clean tool-level error, not a crash), and cross-tenant denial (inherited automatically from the underlying API, no MCP-specific isolation code written or needed) |
-| 14–21 | AI tracing / observability → deployment/polish | Planned |
+| 14 | AI tracing / observability | Done — `app/observability/`: `TracingLLMGateway`/`TracingEmbeddingProvider` wrap the real providers behind their existing interfaces (applied in the two factory functions, zero changes to any caller), plus an explicit trace around `RetrievalService.search` for the one call type that doesn't route through either provider abstraction; new `ai_call_traces` table (migration 0008, verified via empty autogenerate diff), deliberately un-scoped to any tenant (operational/SRE data, not business data) and not yet exposed through the tenant-facing API (would need a cross-org "platform operator" role that doesn't exist) — visible via direct `psql` and `apps/api/scripts/ai_traces_report.py`. 105/105 backend tests pass. Real verification: a full journey against real models produced exactly the right trace for every call (embed_documents, embed_query, retrieval_search, 2× llm_generate) with 0% error rate; a real triage failure through Docker Compose (Ollama unreachable) was correctly traced as a failure with the full error message, confirmed via both psql and the report script |
+| 15–21 | Automated evaluation harness → deployment/polish | Planned |

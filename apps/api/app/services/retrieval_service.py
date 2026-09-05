@@ -1,9 +1,13 @@
+import json
+import time
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embeddings.base import EmbeddingProvider
+from app.models.ai_call_trace import AICallStatus, AICallType
 from app.models.document_chunk import DocumentChunk
+from app.observability.tracer import record_ai_call
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 
 # Standard Reciprocal Rank Fusion constant (Cormack et al., 2009) — large
@@ -48,28 +52,53 @@ class RetrievalService:
         value, not a 0..1 relevance measure — only meaningful for ranking
         within one query's results, not for comparison across queries.
         """
-        candidate_pool = max(limit * _CANDIDATE_POOL_MULTIPLIER, _MIN_CANDIDATE_POOL)
-        query_embedding = await self._embeddings.embed_query(query)
+        start = time.perf_counter()
+        try:
+            candidate_pool = max(limit * _CANDIDATE_POOL_MULTIPLIER, _MIN_CANDIDATE_POOL)
+            query_embedding = await self._embeddings.embed_query(query)
 
-        vector_results = await self._chunks.search_similar(
-            organisation_id=organisation_id,
-            query_embedding=query_embedding,
-            submission_id=submission_id,
-            limit=candidate_pool,
+            vector_results = await self._chunks.search_similar(
+                organisation_id=organisation_id,
+                query_embedding=query_embedding,
+                submission_id=submission_id,
+                limit=candidate_pool,
+            )
+            lexical_results = await self._chunks.search_lexical(
+                organisation_id=organisation_id,
+                query=query,
+                submission_id=submission_id,
+                limit=candidate_pool,
+            )
+
+            scores: dict[uuid.UUID, float] = {}
+            chunks_by_id: dict[uuid.UUID, tuple[DocumentChunk, int]] = {}
+            for ranked_list in (vector_results, lexical_results):
+                for rank, (chunk, page_number, _relevance) in enumerate(ranked_list, start=1):
+                    scores[chunk.id] = scores.get(chunk.id, 0.0) + 1.0 / (_RRF_K + rank)
+                    chunks_by_id[chunk.id] = (chunk, page_number)
+
+            ranked_ids = sorted(scores, key=lambda chunk_id: scores[chunk_id], reverse=True)[:limit]
+            results = [(*chunks_by_id[chunk_id], scores[chunk_id]) for chunk_id in ranked_ids]
+        except Exception as exc:
+            await record_ai_call(
+                call_type=AICallType.RETRIEVAL_SEARCH,
+                provider="hybrid",
+                model="vector+lexical-rrf",
+                status=AICallStatus.FAILURE,
+                latency_ms=(time.perf_counter() - start) * 1000,
+                call_metadata=json.dumps({"query_length": len(query), "limit": limit}),
+                error_message=str(exc),
+            )
+            raise
+
+        await record_ai_call(
+            call_type=AICallType.RETRIEVAL_SEARCH,
+            provider="hybrid",
+            model="vector+lexical-rrf",
+            status=AICallStatus.SUCCESS,
+            latency_ms=(time.perf_counter() - start) * 1000,
+            call_metadata=json.dumps(
+                {"query_length": len(query), "limit": limit, "result_count": len(results)}
+            ),
         )
-        lexical_results = await self._chunks.search_lexical(
-            organisation_id=organisation_id,
-            query=query,
-            submission_id=submission_id,
-            limit=candidate_pool,
-        )
-
-        scores: dict[uuid.UUID, float] = {}
-        chunks_by_id: dict[uuid.UUID, tuple[DocumentChunk, int]] = {}
-        for ranked_list in (vector_results, lexical_results):
-            for rank, (chunk, page_number, _relevance) in enumerate(ranked_list, start=1):
-                scores[chunk.id] = scores.get(chunk.id, 0.0) + 1.0 / (_RRF_K + rank)
-                chunks_by_id[chunk.id] = (chunk, page_number)
-
-        ranked_ids = sorted(scores, key=lambda chunk_id: scores[chunk_id], reverse=True)[:limit]
-        return [(*chunks_by_id[chunk_id], scores[chunk_id]) for chunk_id in ranked_ids]
+        return results
