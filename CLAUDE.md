@@ -145,4 +145,10 @@ ends with a stop point for explicit user go-ahead.
 - AI call trace report: `cd apps/api && DATABASE_URL=... SESSION_SECRET=...
   python3 scripts/ai_traces_report.py` — count/avg latency/error rate per
   call type, plus recent failures
+- Extraction accuracy eval (deterministic): `source apps/api/.venv/bin/activate
+  && DATABASE_URL=... SESSION_SECRET=... python3 -m evals.extraction.run`
+  (from repo root; see `evals/README.md`)
+- Triage faithfulness eval (LLM-as-judge): `source apps/api/.venv/bin/activate
+  && DATABASE_URL=... SESSION_SECRET=... python3 -m evals.triage_faithfulness.run`
+  (from repo root; see `evals/README.md`)
 - Eval smoke test: _TBD (Stage 17)_

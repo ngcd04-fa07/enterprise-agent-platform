@@ -1204,6 +1204,59 @@ and the full error message, both via `psql` and via the report script's
 "most recent failures" section, correctly showing a 100% error rate for
 that call type.
 
+## Decision: Stage 15 evaluation harness — deterministic for extraction, LLM-as-judge only for summary faithfulness
+
+**Context.** CLAUDE.md's AI rules: "Prefer deterministic evaluators in
+the eval platform; LLM-as-judge only for genuinely semantic dimensions,
+and only with versioned prompts and structured output." Two AI-output
+features existed with no systematic quality measurement — extraction
+(Stage 9) and the triage summary (Stage 12) — and they call for two
+different kinds of evaluator, not one generic "eval" tool.
+
+**Decision.** `evals/extraction/`: scores the real `ExtractionService`
+against a hand-labeled dataset via normalized substring matching — no LLM
+call. Whether the extracted text contains "$500,000" is a plain string
+comparison, not a judgment call. `evals/triage_faithfulness/`: the one
+genuinely semantic question in this app — does the triage summary
+accurately restate exactly the facts/findings it was given, without
+inventing anything or contradicting the recommendation — judged by a
+second LLM call (same `llm_gateway`, no new provider), with a versioned
+prompt constant (`JUDGE_PROMPT_VERSION`) and a structured
+`FaithfulnessVerdict` schema. The recommendation itself is never judged
+here; it's deterministic (`app/agents/underwriting_rules.py`) and already
+covered by unit tests — an eval for it would just be re-testing code that
+already has no randomness to evaluate.
+
+**Why a new `evals/`, not extending `benchmarks/`.** Same tooling shape
+(labeled dataset + runner + metric, same rolled-back-transaction seeding
+pattern) but a different purpose: `benchmarks/retrieval/` (Stage 11)
+tunes *ranking quality* — there's no ground-truth "correct" ordering, just
+better/worse. `evals/` measures AI-output *correctness against ground
+truth or a faithfulness standard* — closer to a regression/compliance
+check than a tuning tool. The roadmap itself names these as separate
+stages (11 and 15) for the same reason; conflating them into one
+"benchmarks" tool would blur a real conceptual distinction for the sake
+of directory-count convenience.
+
+**Real, honestly-reported result — the judge caught something, including
+about itself.** Ran both evaluators against the real `qwen2.5:3b` model,
+twice each. Extraction: 100% precision, 80% recall across 4 hand-labeled
+cases (zero hallucinations, 2 missed fields) — a systematic confirmation
+of Stage 9's one-off observation, not a new finding. Triage faithfulness:
+all 4 scenarios scored `faithful: true` in both runs, but the *reasoning
+quality varied run to run*, not just case to case — the first run's
+scenario 3 judge reasoning was self-inconsistent (names a real omission
+as "a flaw in the summary" while still returning `faithful: true`, and
+separately mischaracterizes a `low`-severity finding as high-severity),
+while the second run over the identical scenarios produced fully
+coherent, correct reasoning throughout with no such errors. Documented
+plainly in `evals/README.md` rather than smoothed over: a small local
+judge model is a real, useful signal for gross failures (invented facts,
+contradicted recommendations), not a stable, precise pass/fail on its
+own — its `issues` output needs a human to actually read it on any given
+run, which is exactly what versioned, structured LLM-as-judge output is
+for.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1297,6 +1350,12 @@ dependencies — see the decision above for why.
 SQLAlchemy already in `apps/api`'s dependencies; no observability/APM
 vendor SDK needed for a local-first, single-process app at this stage.
 
+**Stage 15 (`evals/`):** No new dependencies — reuses `apps/api`'s
+already-installed dependencies (SQLAlchemy, Pydantic) by running inside
+its virtualenv, same borrowing pattern as `benchmarks/`. No eval
+framework (e.g. `promptfoo`, `deepeval`) needed for two small, purpose-
+built evaluators.
+
 ---
 
 ## Roadmap
@@ -1324,4 +1383,5 @@ each stage as it happens, plus a status line per stage below.
 | 12 | Agentic workflow (underwriting triage) | Done — `AgentService.run_triage`: a fixed-sequence pipeline (gather evidence → read extracted fields → apply deterministic rules → LLM-synthesized narrative summary only), not a dynamic tool-selection loop — see the decision below for why; deterministic rules in `app/agents/underwriting_rules.py` (never the model) decide `recommendation`; every step logged as an auditable `AgentToolCall`; human approval unconditional in this first version (`requires_human_approval` always true, no auto-effect on `Submission.status`); migration 0007 verified via empty autogenerate diff; 101/101 backend tests pass; real end-to-end run against the real `qwen2.5:3b` model correctly flagged missing fields, recommended "refer," and produced an accurate, grounded narrative summary — approval flow and cross-tenant denial both confirmed live; graceful `201`/`status: "failed"` degradation confirmed through the full docker-compose stack when Ollama is unreachable |
 | 13 | MCP tool integrations | Done — `mcp_server/`, a standalone MCP server (stdio transport, own minimal venv) exposing 8 tools as thin wrappers over the real HTTP API with a real session from a real login — see the decision below for why a server (not the agent becoming an MCP client), and why proxying real HTTP calls rather than a new auth mechanism. 7/7 unit tests pass against a mocked transport; real end-to-end verification against a live API and the real `mcp` Python client library covered every tool, a deliberate not-found failure (clean tool-level error, not a crash), and cross-tenant denial (inherited automatically from the underlying API, no MCP-specific isolation code written or needed) |
 | 14 | AI tracing / observability | Done — `app/observability/`: `TracingLLMGateway`/`TracingEmbeddingProvider` wrap the real providers behind their existing interfaces (applied in the two factory functions, zero changes to any caller), plus an explicit trace around `RetrievalService.search` for the one call type that doesn't route through either provider abstraction; new `ai_call_traces` table (migration 0008, verified via empty autogenerate diff), deliberately un-scoped to any tenant (operational/SRE data, not business data) and not yet exposed through the tenant-facing API (would need a cross-org "platform operator" role that doesn't exist) — visible via direct `psql` and `apps/api/scripts/ai_traces_report.py`. 105/105 backend tests pass. Real verification: a full journey against real models produced exactly the right trace for every call (embed_documents, embed_query, retrieval_search, 2× llm_generate) with 0% error rate; a real triage failure through Docker Compose (Ollama unreachable) was correctly traced as a failure with the full error message, confirmed via both psql and the report script |
-| 15–21 | Automated evaluation harness → deployment/polish | Planned |
+| 15 | Automated evaluation harness | Done — `evals/extraction/` (deterministic: normalized substring matching against a 4-case hand-labeled dataset, real `ExtractionService`, real Ollama) and `evals/triage_faithfulness/` (LLM-as-judge: versioned prompt, structured `FaithfulnessVerdict`, real `AgentService`) — see the decision below for why these are two different evaluator kinds, and why a new `evals/` rather than extending `benchmarks/`. Real results: extraction scored 100% precision / 80% recall (zero hallucinations, consistent with Stage 9); the faithfulness judge scored 4/4 "faithful" across two separate runs, but its reasoning quality varied run to run — self-inconsistent on one scenario in the first run, fully coherent on the identical scenario in a second run — reported honestly, not smoothed over. Both seed fixtures inside a rolled-back transaction, verified via psql to leave zero rows behind |
+| 16–21 | Model routing → deployment/polish | Planned |
