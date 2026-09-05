@@ -17,7 +17,7 @@ Fictional use case: commercial insurance underwriting document intelligence — 
 
 Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
 
-It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 12 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search backed by a real benchmark, and a first agentic workflow: automated underwriting triage with deterministic rules, an auditable pipeline, and mandatory human approval. MCP tool integrations and observability are the next stages.
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently through **Stage 13 of 21** — auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search backed by a real benchmark, a first agentic workflow (automated underwriting triage with deterministic rules, an auditable pipeline, and mandatory human approval), and an MCP server exposing all of it as typed tools with zero new trust decisions. AI tracing/observability and agent evaluation are the next stages.
 
 ## Table of contents
 
@@ -37,6 +37,11 @@ It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), currently thr
 flowchart LR
     subgraph Client
         Browser
+        MCPClient["MCP client\n(Claude Desktop / Code)"]
+    end
+
+    subgraph "mcp_server — standalone"
+        MCP["MCP server\n8 tools, thin HTTP wrappers"]
     end
 
     subgraph "apps/web — Next.js"
@@ -61,6 +66,8 @@ flowchart LR
 
     Browser -->|"same-origin /api/*"| UI
     UI -->|HttpOnly cookie session| Auth
+    MCPClient -->|stdio| MCP
+    MCP -->|"real session, same as browser"| Auth
     Auth --> Sub
     Sub --> Ing
     Ing --> FS
@@ -93,6 +100,7 @@ What this project is actually meant to demonstrate, beyond "it works":
 - **Consequential actions stay human-gated.** The triage agent's recommendation never auto-applies to a submission's status; every run requires an explicit, audited approval action, and there's no "decline" the agent can produce at all in this first version — only a human, through the ordinary submission-update path, makes that call.
 - **Verification over vibes.** Every stage has been checked against a *real* Postgres instance, a *real* embedding model, and a *real* local LLM — not just a green test suite. This discipline has caught seven real, reproducible bugs invisible to `mypy`/`ruff`/a passing local test run, plus honest reporting of real model-reliability limits (a 3B local model correctly extracted 3 of 5 target fields from a test submission, with zero hallucinated values, both in extraction and in the triage agent built on top of it). Full writeups in [`docs/architecture.md`](docs/architecture.md).
 - **No hidden provider coupling.** LLM and embedding calls are abstracted behind a gateway interface — swapping providers touches one file, not business logic.
+- **New surfaces don't get new trust decisions.** The MCP server (Stage 13) is a thin proxy over the real HTTP API, authenticated with a real session from the real login flow — an MCP client can never do anything that session's role couldn't already do in the browser. Tenant isolation and RBAC are inherited, not reimplemented.
 
 ## Capabilities
 
@@ -111,9 +119,9 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | ✅ | Retrieval benchmark (Recall@k / MRR, vector vs. lexical vs. hybrid) |
 | ✅ | Agentic underwriting workflow (rules-driven triage, auditable pipeline) |
 | ✅ | Human approval / review queue (mandatory on every agent run) |
+| ✅ | MCP integrations (server exposing search/extraction/triage as tools) |
+| ✅ | Permission-aware tool calling (MCP tools inherit real session RBAC) |
 | ⬜ | Evidence-level citations in the UI |
-| ⬜ | MCP integrations |
-| ⬜ | Permission-aware tool calling |
 | ⬜ | AI tracing / observability |
 | ⬜ | Automated evaluation harness |
 | ⬜ | Model routing |
@@ -130,6 +138,7 @@ Only checked once actually implemented **and verified** in this repo — see [Ve
 | Frontend | Next.js 15 (App Router) + TypeScript | Same-origin API proxy keeps the session cookie first-party |
 | Migrations | Alembic (async), autogenerate-diff-verified | Every migration checked to produce an empty diff against the models |
 | CI/CD | GitHub Actions | Lint, types, tests against real Postgres, full Docker Compose boot — every push |
+| Tool integration | MCP (`mcp` Python SDK), stdio transport | Standard protocol for exposing tools to any MCP client, not a bespoke API-key scheme |
 
 ## Quick start
 
@@ -178,6 +187,7 @@ npm run build
 apps/api/     FastAPI backend — routes → services → repositories → models
 apps/web/     Next.js (App Router, TypeScript) frontend
 benchmarks/   Retrieval quality benchmark (Recall@k / MRR), runs against apps/api's own code
+mcp_server/   MCP server exposing the API as tools — a thin HTTP proxy, its own minimal venv
 docs/         Architecture decisions, rationale, verification log
 .github/      CI workflows
 docker-compose.yml
@@ -185,7 +195,7 @@ docker-compose.yml
 
 ## Verification & testing
 
-**Status:** Stage 12 (Agentic workflow) — done. 101 backend tests pass against a real Postgres instance, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → triage → approve → logout) has been walked both by automated tests and live against real models. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
+**Status:** Stage 13 (MCP tool integrations) — done. 101 backend tests plus 7 MCP-server tests pass, CI builds and boots the full Docker Compose stack on every push ([latest green run](https://github.com/ngcd04-fa07/enterprise-agent-platform/actions/workflows/ci.yml)), and the full user journey (register → submission → upload → parse → chunk → embed → hybrid search → extract → triage → approve → logout) has been walked both by automated tests and live against real models — including, for the first time, through a real MCP client rather than only the browser or curl. Stage 8 also passed a release-candidate audit of Stages 1-8 before Stage 9 began; see [`docs/architecture.md`](docs/architecture.md) for the full writeup.
 
 <details>
 <summary><strong>Full verification log — what was actually run, and eight real bugs it caught</strong></summary>
@@ -199,6 +209,7 @@ docker-compose.yml
 - A live end-to-end **structured extraction** check against the real local LLM (not the fake): a realistic 2-page underwriting submission correctly yielded 3 of 5 target fields — broker name, business description, coverage limit — each verbatim and citing the exact correct source page, with zero hallucinated values, confirmed via `GET /submissions/{id}/extraction` and direct `psql` inspection of the persisted rows.
 - A real **retrieval benchmark** run (`benchmarks/retrieval/`, real Postgres + real embedding model, 12 hand-labeled queries): vector-only scored Recall@5 = 1.000 / MRR = 0.840, lexical-only 0.333 / 0.333 (only hitting where literal vocabulary actually overlapped — several queries share zero words with their relevant chunk), hybrid tied vector exactly. Reported honestly rather than reframed as a bigger win: RRF's floor is "as good as the better individual signal," and this benchmark's real, demonstrated value is the exact-identifier case already shown live above, not average-case superiority over a strong embedding model. The benchmark seeds its fixtures inside a transaction it always rolls back — verified via direct `psql` inspection to leave zero rows behind.
 - A live end-to-end **agentic triage** run against the real local LLM: uploaded a realistic submission, extracted 3 of 5 fields, then ran triage — correctly flagged the two missing fields (high/low severity), correctly recommended "refer" from plain-code rules alone, and the model's narrative summary accurately restated exactly the given facts without inventing anything or overriding the given recommendation. Approved the run as admin (`approved_by_user_id`/`approved_at` confirmed via `psql`); a second organisation was denied `404` on both reading and approving it. Through the full Docker Compose stack (Ollama unreachable from inside the container, same constraint as extraction), the endpoint still returned a clean `201` with `status: "failed"` — no crash, no impact on any other route.
+- A live **MCP server** check using the real `mcp` Python client library (not a mock): a real login, then every one of the 8 tools called for real against a running API — including `trigger_triage` running a real triage pass and `approve_agent_run` confirmed via `psql`. Also verified the failure path deliberately: an MCP call for a nonexistent submission correctly surfaced as a clean tool-level error (`is_error: true`), not a crash. A second organisation's MCP session saw an empty submission list and the same clean error trying to reach the first organisation's data by id — tenant isolation inherited automatically from the underlying API, with no MCP-specific isolation code to get wrong.
 - A live two-organisation attack test against the running Docker Compose stack (not the test suite): a real second organisation's session, holding real UUIDs from the first, was denied on every read/write path tried (submissions, documents, pages, content, search) — all `404`, no existence leak — while a search for the first org's exact text run inside the second org's own submission returned zero results.
 - Manual checks confirm the session cookie is `HttpOnly`, CSRF is enforced in both directions, and the raw session token never appears in a response body or log — only its HMAC lives in the database.
 - A live Docker Compose durability check — upload, download, restart the API container, download again — confirmed uploaded documents persist on the storage volume, not just in-process memory.
@@ -226,4 +237,4 @@ Full writeups of all eight: [`docs/architecture.md`](docs/architecture.md).
 
 ## Limitations
 
-This is Stage 12 of an intentionally staged 21-stage build. No reranking exists yet, and no MCP tool integrations or AI tracing/observability exist yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). The retrieval benchmark's 12 hand-labeled queries is a small, self-authored sample, not a large or adversarial evaluation set — it's a real, honest measurement tool, not a claim that these specific numbers generalize; hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) was deliberately left untuned against it for that reason. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. The triage agent is a fixed pipeline with a first, deliberately simple rule set (four checks), always recommends "approve" or "refer" and never "decline," and always requires human approval with no automatic effect on `Submission.status` — a conservative first version by design, not a placeholder awaiting a missing piece. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction and triage only work end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance.
+This is Stage 13 of an intentionally staged 21-stage build. No reranking exists yet, and no AI tracing/observability or automated agent-evaluation harness exist yet — see the roadmap table in [`docs/architecture.md`](docs/architecture.md). The retrieval benchmark's 12 hand-labeled queries is a small, self-authored sample, not a large or adversarial evaluation set — it's a real, honest measurement tool, not a claim that these specific numbers generalize; hybrid retrieval's Reciprocal Rank Fusion constant (`k=60`, the standard default) was deliberately left untuned against it for that reason. Structured extraction targets a small, fixed set of fields (not open-ended extraction), runs synchronously per request (same tradeoff as document ingestion), and — being a local 3B-parameter model rather than a frontier one — correctly leaves a field null more often than a hosted model would, at the benefit of never fabricating a value. The triage agent is a fixed pipeline with a first, deliberately simple rule set (four checks), always recommends "approve" or "refer" and never "decline," and always requires human approval with no automatic effect on `Submission.status` — a conservative first version by design, not a placeholder awaiting a missing piece. Ollama isn't containerized in Docker Compose (see the LLM provider decision in `docs/architecture.md`), so extraction and triage only work end-to-end via the native (non-Docker) dev flow unless you separately point `OLLAMA_BASE_URL` at a reachable instance. The MCP server requires a manually-obtained session token (`mcp_server/login.py`) rather than a first-class OAuth flow — a reasonable scope boundary for a local dev tool, not something a multi-user production MCP deployment would use as-is.

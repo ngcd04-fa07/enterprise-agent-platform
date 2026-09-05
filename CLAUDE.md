@@ -135,4 +135,11 @@ ends with a stop point for explicit user go-ahead.
 - Retrieval benchmark: `source apps/api/.venv/bin/activate && DATABASE_URL=...
   SESSION_SECRET=... python3 -m benchmarks.retrieval.run` (from repo root;
   see `benchmarks/README.md`)
+- MCP server install: `cd mcp_server && python3 -m venv .venv && source
+  .venv/bin/activate && pip install -e ".[dev]"`
+- MCP server lint/type/test: `cd mcp_server && ruff check . && ruff format
+  --check . && mypy . && pytest`
+- MCP server: get a session with `python3 mcp_server/login.py --email
+  you@example.com`, then run `mcp_server/server.py` with the printed
+  `SESSION_TOKEN`/`CSRF_TOKEN` set — see `mcp_server/README.md`
 - Eval smoke test: _TBD (Stage 17)_

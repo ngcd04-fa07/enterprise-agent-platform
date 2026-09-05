@@ -1070,6 +1070,70 @@ optional (so `model_validate({})` never raised), only surfacing once
 Fixed so the fake matches the interface's actual contract
 (`generate_structured` never raises anything but `LLMGenerationError`).
 
+## Decision: Stage 13 MCP — this platform as an MCP *server*, not an MCP *client*
+
+**Context.** "MCP tool integration" has two natural readings: the
+existing triage agent calling out to *external* MCP tool servers, or this
+platform exposing *its own* capabilities as MCP tools for an external
+client to call. Asked the user directly rather than guessing — this is a
+genuine fork, not a case where the project's own principles point clearly
+one way.
+
+**Decision.** This platform as an MCP server. Making the triage agent an
+MCP client would need either a real external MCP server to depend on or a
+second toy one built just to call — in both cases a new external
+dependency for a fixed-sequence pipeline that (per the Stage 12 decision)
+deliberately doesn't do dynamic tool selection anyway. Exposing this
+platform's own capabilities is self-contained and directly demonstrates
+the tool-permission principles CLAUDE.md already commits to.
+
+**Design — a thin HTTP-proxying layer, not a new auth/permission system.**
+`mcp_server/server.py`'s tools (`list_submissions`, `get_submission`,
+`search_submission`, `get_extraction`, `list_agent_runs`,
+`get_agent_run`, `trigger_triage`, `approve_agent_run`) are each a direct
+wrapper (`mcp_server/api_client.py`) around a real HTTP call to the real
+running API, authenticated with a real session obtained through the real
+`/auth/login` flow (`mcp_server/login.py` — a one-time helper, not part of
+the server process). This was the central design choice: an alternative
+"service account" or API-key auth mechanism built specifically for MCP
+would be a **second** place enforcing tenant isolation and RBAC, needing
+its own audit from scratch. Proxying the real HTTP API with a real
+browser-equivalent session means the MCP layer inherits every existing
+guarantee unchanged and makes zero new trust decisions — "tool
+permissions come from trusted application config... never from model
+output" (CLAUDE.md) holds trivially, because the config *is* the
+session's role, exactly as it is for the web frontend.
+
+**Why a separate root-level `mcp_server/`, with its own venv (not
+borrowing `apps/api`'s, unlike `benchmarks/`).** `benchmarks/` imports
+`apps/api`'s Python code directly (same process, same dependencies:
+SQLAlchemy, fastembed, etc.) — `mcp_server/` doesn't import any of that;
+it only ever makes HTTP calls, so it needs just `mcp` and `httpx`. Giving
+it apps/api's full dependency set would be dead weight. Same repository-
+layout principle as Stage 11 (a top-level package only once something
+outside `apps/api` needs to exist), applied with a different concrete
+answer because the actual coupling is different.
+
+**Real end-to-end verification**, native (non-Docker) flow, real login
+against a real running API: registered a user, created and uploaded a
+document to a submission, ran `login.py` for a real session, then drove
+`server.py` as a real MCP server subprocess with the actual `mcp` Python
+client library (not a mock) — every tool call succeeded for real:
+`list_submissions`, `get_submission`, `search_submission`,
+`trigger_triage` (a real triage run against the real `qwen2.5:3b` model,
+correctly flagging missing fields and recommending "refer"), and
+`approve_agent_run` (confirmed via direct `psql` that
+`approved_by_user_id`/`approved_at` were set). Also verified the failure
+path deliberately: calling `get_submission` with a nonexistent id
+correctly raised `ApiError` inside the tool, which the MCP framework
+caught and surfaced as a clean tool-level error (`is_error: True`) — not
+a crashed server and not a leaked stack trace to the client. Verified
+tenant isolation live: a second organisation's MCP session saw an empty
+`list_submissions` result and got the same clean tool-level error
+attempting to read or search the first organisation's submission by id —
+inherited automatically from the underlying API's existing tenant
+scoping, with no MCP-specific isolation code to get wrong.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1151,6 +1215,13 @@ the existing `llm_gateway` abstraction and repositories; a fixed-sequence
 pipeline needs no agent framework (LangGraph, CrewAI, etc.), consistent
 with the decision above.
 
+**Stage 13 (`mcp_server/`):** `mcp` (the official Python MCP SDK, v2 —
+`FastMCP` was renamed `MCPServer` in this version; used the current API
+rather than pinning to v1 for an old tutorial's sake) and `httpx` (already
+used elsewhere in the project for the same reason: a real async HTTP
+client). Its own minimal `pyproject.toml`/venv, not part of `apps/api`'s
+dependencies — see the decision above for why.
+
 ---
 
 ## Roadmap
@@ -1176,4 +1247,5 @@ each stage as it happens, plus a status line per stage below.
 | 10 | Hybrid retrieval | Done — generated `search_vector` tsvector column + GIN index (migration 0006, verified via empty autogenerate diff); `DocumentChunkRepository.search_lexical` (websearch_to_tsquery + ts_rank_cd, tenant-scoped in SQL); `RetrievalService` now fuses vector + lexical results via Reciprocal Rank Fusion, `strategy` reports `"hybrid"`; 83/83 backend tests pass, including a deterministic proof (hand-constructed embeddings) that hybrid correctly ranks a lexically-relevant chunk above a semantically-closer-but-irrelevant one; live-verified against the real embedding model through Docker Compose on both an exact-identifier query (lexical wins) and a paraphrased query with no word overlap (vector wins) |
 | 11 | Retrieval benchmark | Done — `benchmarks/retrieval/` (hand-labeled 12-query/12-chunk fixture set, Recall@5/MRR for vector/lexical/hybrid, RRF-k sensitivity sweep); seeds and always rolls back its own transaction, verified via direct psql inspection to leave zero rows behind; real result against the real embedding model: vector-only already scored Recall@5=1.000/MRR=0.840 on this query set, hybrid tied it exactly (RRF's floor is "as good as the better individual signal," not a guaranteed uplift) — see the decision below for the honest reasoning and why `_RRF_K` was left unchanged |
 | 12 | Agentic workflow (underwriting triage) | Done — `AgentService.run_triage`: a fixed-sequence pipeline (gather evidence → read extracted fields → apply deterministic rules → LLM-synthesized narrative summary only), not a dynamic tool-selection loop — see the decision below for why; deterministic rules in `app/agents/underwriting_rules.py` (never the model) decide `recommendation`; every step logged as an auditable `AgentToolCall`; human approval unconditional in this first version (`requires_human_approval` always true, no auto-effect on `Submission.status`); migration 0007 verified via empty autogenerate diff; 101/101 backend tests pass; real end-to-end run against the real `qwen2.5:3b` model correctly flagged missing fields, recommended "refer," and produced an accurate, grounded narrative summary — approval flow and cross-tenant denial both confirmed live; graceful `201`/`status: "failed"` degradation confirmed through the full docker-compose stack when Ollama is unreachable |
-| 13–21 | MCP tool integrations → deployment/polish | Planned |
+| 13 | MCP tool integrations | Done — `mcp_server/`, a standalone MCP server (stdio transport, own minimal venv) exposing 8 tools as thin wrappers over the real HTTP API with a real session from a real login — see the decision below for why a server (not the agent becoming an MCP client), and why proxying real HTTP calls rather than a new auth mechanism. 7/7 unit tests pass against a mocked transport; real end-to-end verification against a live API and the real `mcp` Python client library covered every tool, a deliberate not-found failure (clean tool-level error, not a crash), and cross-tenant denial (inherited automatically from the underlying API, no MCP-specific isolation code written or needed) |
+| 14–21 | AI tracing / observability → deployment/polish | Planned |
