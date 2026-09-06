@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
 
-from app.llm_gateway.base import LLMGateway  # noqa: E402
+from app.llm_gateway.base import LLMGateway, TaskComplexity  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 # Bumping this is a real change to what's being measured — CLAUDE.md:
@@ -46,6 +46,14 @@ async def judge_summary(
     llm: LLMGateway, *, input_summary: str, output_summary: str
 ) -> FaithfulnessVerdict:
     user_prompt = f"INPUT:\n{input_summary}\n\nSUMMARY:\n{output_summary}"
+    # COMPLEX (Stage 16): fact-checking is exactly the reasoning-heavy task
+    # RoutingLLMGateway's capable tier exists for, and Stage 15's own
+    # finding (the judge's reasoning was inconsistent run to run) is a
+    # direct, concrete reason to route this call there rather than assume
+    # the fast tier is good enough for judging.
     return await llm.generate_structured(
-        system_prompt=_JUDGE_SYSTEM_PROMPT, user_prompt=user_prompt, schema=FaithfulnessVerdict
+        system_prompt=_JUDGE_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        schema=FaithfulnessVerdict,
+        complexity=TaskComplexity.COMPLEX,
     )

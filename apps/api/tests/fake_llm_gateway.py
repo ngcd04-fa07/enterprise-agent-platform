@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from app.llm_gateway.base import LLMGateway, LLMGenerationError, SchemaT
+from app.llm_gateway.base import LLMGateway, LLMGenerationError, SchemaT, TaskComplexity
 
 
 class FakeLLMGateway(LLMGateway):
@@ -27,12 +27,19 @@ class FakeLLMGateway(LLMGateway):
         self.default_response: dict[str, str | None] | None = None
         self.should_fail = False
         self.calls: list[str] = []
+        self.complexities_seen: list[TaskComplexity] = []
 
     async def generate_structured(
-        self, *, system_prompt: str, user_prompt: str, schema: type[SchemaT]
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: type[SchemaT],
+        complexity: TaskComplexity = TaskComplexity.SIMPLE,
     ) -> SchemaT:
         del system_prompt
         self.calls.append(user_prompt)
+        self.complexities_seen.append(complexity)
         if self.should_fail:
             raise LLMGenerationError("simulated LLM failure")
         fallback = self.default_response if self.default_response is not None else {}

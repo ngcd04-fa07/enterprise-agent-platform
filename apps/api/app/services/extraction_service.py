@@ -3,7 +3,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.llm_gateway.base import LLMGateway, LLMGenerationError
+from app.llm_gateway.base import LLMGateway, LLMGenerationError, TaskComplexity
 from app.models.extraction import ExtractionRun, ExtractionStatus
 from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.extracted_field_repository import ExtractedFieldRepository
@@ -51,6 +51,14 @@ class ExtractionService:
                     system_prompt=_SYSTEM_PROMPT,
                     user_prompt=chunk.text,
                     schema=ChunkExtraction,
+                    # Explicit, not just the default: this runs once per chunk,
+                    # so escalating every call to the capable tier (Stage 16)
+                    # would multiply latency across a whole submission for a
+                    # cost/latency tradeoff, not a demonstrated reliability
+                    # gap this call itself could detect (a missed field looks
+                    # identical to a genuinely absent one — see
+                    # evals/extraction/ for how that gap is actually measured).
+                    complexity=TaskComplexity.SIMPLE,
                 )
                 for field_name in EXTRACTION_FIELD_NAMES:
                     if field_name in found:

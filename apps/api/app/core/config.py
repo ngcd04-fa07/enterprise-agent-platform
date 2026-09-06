@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # (OllamaGateway raises LLMGenerationError), not silently.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:3b"
+    # The "capable" tier RoutingLLMGateway escalates to for complexity=COMPLEX
+    # calls (triage synthesis, eval judging) and on fast-tier failure — see
+    # docs/architecture.md, model routing decision. Same no-API-key rationale
+    # as ollama_model; just a second, larger local model.
+    ollama_capable_model: str = "qwen2.5:14b"
 
 
 @lru_cache

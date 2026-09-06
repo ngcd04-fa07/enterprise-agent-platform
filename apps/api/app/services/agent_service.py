@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.underwriting_rules import Flag, determine_recommendation, evaluate_submission
-from app.llm_gateway.base import LLMGateway, LLMGenerationError
+from app.llm_gateway.base import LLMGateway, LLMGenerationError, TaskComplexity
 from app.models.agent import AgentRun, AgentRunStatus, RecommendationType
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
@@ -57,6 +57,12 @@ class AgentService:
     AgentToolCall, satisfying CLAUDE.md's "tool calls are typed,
     validated, and auditable" without needing a pluggable tool-registry
     this project has no second consumer for yet.
+
+    The synthesis call requests TaskComplexity.COMPLEX (Stage 16, see
+    RoutingLLMGateway) — Stage 12/15 both found the local 3B model's
+    *reasoning* quality, not just its factual recall, was where it was
+    weakest, and reasoning about how to phrase these findings is exactly
+    what this one call does.
     """
 
     def __init__(self, db: AsyncSession, llm: LLMGateway) -> None:
@@ -130,7 +136,10 @@ class AgentService:
         prompt = _build_summary_prompt(extracted_fields, flags, recommendation)
         try:
             result = await self._llm.generate_structured(
-                system_prompt=_SUMMARY_SYSTEM_PROMPT, user_prompt=prompt, schema=TriageSummary
+                system_prompt=_SUMMARY_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                schema=TriageSummary,
+                complexity=TaskComplexity.COMPLEX,
             )
         except LLMGenerationError as exc:
             run.status = AgentRunStatus.FAILED

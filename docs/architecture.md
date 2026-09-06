@@ -1257,6 +1257,75 @@ own — its `issues` output needs a human to actually read it on any given
 run, which is exactly what versioned, structured LLM-as-judge output is
 for.
 
+## Decision: Stage 16 model routing — two local models via Ollama, a caller-supplied complexity hint, no hosted fallback
+
+**Context.** Stage 12 and Stage 15 both independently found the same weak
+spot in the single `qwen2.5:3b` model: its *reasoning* quality (not its
+factual recall) was where it struggled — Stage 15's faithfulness judge in
+particular showed reasoning that was inconsistent run to run on identical
+input. The roadmap calls for "model routing" at Stage 16; the real
+question was what to route between and on what signal, without
+introducing a hosted API key/cost the rest of this project has
+deliberately avoided since Stage 9.
+
+**Decision.** Pull a second, larger local model (`qwen2.5:14b`, no new
+provider, no API key — same rationale as the original `OllamaGateway`
+decision) and add a `RoutingLLMGateway` that sits behind the same
+`LLMGateway` interface every caller already uses. Routing is driven by an
+explicit `TaskComplexity` enum (`SIMPLE`/`COMPLEX`) the *caller* passes in
+— extraction's per-chunk call, the triage synthesis call, and the eval
+judge's call each know whether their own task is high-volume/routine or
+reasoning-heavy; nothing below that layer could infer it from the prompt
+text without adding a real classification step of its own, which would be
+strictly more machinery for a signal the caller already has for free.
+`RoutingLLMGateway` does two distinct things with that hint: (1)
+`complexity=COMPLEX` always goes to the capable tier — used by triage
+synthesis and the eval judge, the two calls Stage 12/15 identified as
+reasoning-heavy; (2) on the fast tier, any `LLMGenerationError` (model
+unreachable, or malformed output surviving the fast gateway's own bounded
+retry) escalates once to the capable tier before giving up — a resilience
+behavior for outages, not a fix for Stage 9/15's "missed field" gap (a
+`null` field isn't a failure this layer can see at all, only the eval
+harness comparing against ground truth can).
+
+**Why extraction stays on `SIMPLE` by default.** Extraction runs once per
+chunk, so defaulting every call to the 14B model would multiply latency
+across a whole submission for a cost/latency tradeoff, not a demonstrated
+reliability gap this call itself could detect. This is stated explicitly
+in the code as a deliberate choice, not an oversight.
+
+**Why `TracingLLMGateway` wraps each model individually, not the router
+from outside.** `get_llm_gateway()` constructs `TracingLLMGateway(fast)`
+and `TracingLLMGateway(capable)` separately and hands both to
+`RoutingLLMGateway(fast=..., capable=...)`, rather than wrapping one
+`TracingLLMGateway` around the finished router. Wrapping the router would
+have made every trace row report a single generic identity regardless of
+which tier actually served the call, destroying exactly the kind of
+per-model visibility Stage 14's tracing exists to provide (how often each
+tier is used, how often escalation triggers). Wrapping each model first
+means `ai_call_traces.model` always reflects the model that actually ran.
+
+**Real, live-verified result.** Ran the full extract → triage journey
+against the real, freshly-migrated stack: the extraction call traced as
+`provider=ollama, model=qwen2.5:3b, call_metadata={"complexity": "simple"}`
+and the triage call traced as `provider=ollama, model=qwen2.5:14b,
+call_metadata={"complexity": "complex"}` — confirmed directly via
+`ai_call_traces`, not inferred. Separately, misconfigured `OLLAMA_MODEL` to
+a nonexistent model to force a real fast-tier failure (Ollama returned an
+actual 404): the request still succeeded, `ai_call_traces` shows the
+failed fast-tier attempt (`status=failure`, real error message) followed
+by a successful capable-tier attempt for the same call, and the
+`logger.warning("fast-tier model failed, escalating to capable tier")`
+line appeared in the server log — the full escalation path proven live,
+not just unit-tested. Re-ran both Stage 15 evaluators under the new
+routing: extraction unchanged (100% precision / 80% recall, still on the
+fast tier as designed); the faithfulness judge — now on the capable tier —
+scored 4/4 faithful with clean, self-consistent reasoning on every
+scenario, no repeat of Stage 15's documented run-to-run inconsistency.
+One run is not proof the capable tier eliminates that inconsistency
+entirely, but it is a concrete, favorable data point for the routing
+decision this stage made.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1356,6 +1425,11 @@ its virtualenv, same borrowing pattern as `benchmarks/`. No eval
 framework (e.g. `promptfoo`, `deepeval`) needed for two small, purpose-
 built evaluators.
 
+**Stage 16 backend:** No new Python dependencies — `RoutingLLMGateway` is
+plain Python behind the existing `LLMGateway` interface. The only new
+infrastructure is a second local Ollama model (`qwen2.5:14b`, pulled the
+same way as the original `qwen2.5:3b`, no API key, no new provider).
+
 ---
 
 ## Roadmap
@@ -1384,4 +1458,5 @@ each stage as it happens, plus a status line per stage below.
 | 13 | MCP tool integrations | Done — `mcp_server/`, a standalone MCP server (stdio transport, own minimal venv) exposing 8 tools as thin wrappers over the real HTTP API with a real session from a real login — see the decision below for why a server (not the agent becoming an MCP client), and why proxying real HTTP calls rather than a new auth mechanism. 7/7 unit tests pass against a mocked transport; real end-to-end verification against a live API and the real `mcp` Python client library covered every tool, a deliberate not-found failure (clean tool-level error, not a crash), and cross-tenant denial (inherited automatically from the underlying API, no MCP-specific isolation code written or needed) |
 | 14 | AI tracing / observability | Done — `app/observability/`: `TracingLLMGateway`/`TracingEmbeddingProvider` wrap the real providers behind their existing interfaces (applied in the two factory functions, zero changes to any caller), plus an explicit trace around `RetrievalService.search` for the one call type that doesn't route through either provider abstraction; new `ai_call_traces` table (migration 0008, verified via empty autogenerate diff), deliberately un-scoped to any tenant (operational/SRE data, not business data) and not yet exposed through the tenant-facing API (would need a cross-org "platform operator" role that doesn't exist) — visible via direct `psql` and `apps/api/scripts/ai_traces_report.py`. 105/105 backend tests pass. Real verification: a full journey against real models produced exactly the right trace for every call (embed_documents, embed_query, retrieval_search, 2× llm_generate) with 0% error rate; a real triage failure through Docker Compose (Ollama unreachable) was correctly traced as a failure with the full error message, confirmed via both psql and the report script |
 | 15 | Automated evaluation harness | Done — `evals/extraction/` (deterministic: normalized substring matching against a 4-case hand-labeled dataset, real `ExtractionService`, real Ollama) and `evals/triage_faithfulness/` (LLM-as-judge: versioned prompt, structured `FaithfulnessVerdict`, real `AgentService`) — see the decision below for why these are two different evaluator kinds, and why a new `evals/` rather than extending `benchmarks/`. Real results: extraction scored 100% precision / 80% recall (zero hallucinations, consistent with Stage 9); the faithfulness judge scored 4/4 "faithful" across two separate runs, but its reasoning quality varied run to run — self-inconsistent on one scenario in the first run, fully coherent on the identical scenario in a second run — reported honestly, not smoothed over. Both seed fixtures inside a rolled-back transaction, verified via psql to leave zero rows behind |
-| 16–21 | Model routing → deployment/polish | Planned |
+| 16 | Model routing | Done — `RoutingLLMGateway` routes on a caller-supplied `TaskComplexity` hint (`SIMPLE`/`COMPLEX`), not an inferred signal: triage synthesis and the eval judge request `COMPLEX` and always go to the new local `qwen2.5:14b` "capable" tier; extraction stays `SIMPLE` (fast tier) by default for cost/latency, per chunk. Any fast-tier `LLMGenerationError` escalates once to the capable tier. `TracingLLMGateway` wraps each model individually (not the router) so `ai_call_traces.model` always reflects the model that actually served the call. 110/110 backend tests pass. Real, live-verified: extraction traced to `qwen2.5:3b`/`simple`, triage traced to `qwen2.5:14b`/`complex`; a forced fast-tier failure (misconfigured model name, real 404) correctly escalated to the capable tier end-to-end, logged and traced; both Stage 15 evaluators re-run under the new routing — extraction unchanged (100%/80%), the faithfulness judge (now capable-tier) scored 4/4 faithful with clean, self-consistent reasoning on every scenario, no repeat of Stage 15's documented run-to-run inconsistency; full Docker Compose stack rebuilt and confirmed healthy with no code changes needed |
+| 17–21 | Eval-integrated CI → deployment/polish | Planned |

@@ -120,9 +120,10 @@ ends with a stop point for explicit user go-ahead.
 - Backend format check: `cd apps/api && ruff format --check .`
 - Backend type check: `cd apps/api && mypy app`
 - Backend tests: `cd apps/api && pytest`
-- Local LLM for structured extraction (Stage 9+): `ollama serve` then
-  `ollama pull qwen2.5:3b` — optional; the app runs without it, extraction
-  just returns `status: "failed"` until it's reachable
+- Local LLMs for structured extraction/triage (Stage 9+, routed Stage 16+):
+  `ollama serve` then `ollama pull qwen2.5:3b && ollama pull qwen2.5:14b` —
+  optional; the app runs without them, extraction/triage just return
+  `status: "failed"` until they're reachable
 - Frontend install: `cd apps/web && npm install`
 - Frontend lint: `cd apps/web && npm run lint`
 - Frontend type check: `cd apps/web && npm run typecheck`

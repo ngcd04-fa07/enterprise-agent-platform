@@ -3,7 +3,7 @@ import json
 import httpx
 from pydantic import ValidationError
 
-from app.llm_gateway.base import LLMGateway, LLMGenerationError, SchemaT
+from app.llm_gateway.base import LLMGateway, LLMGenerationError, SchemaT, TaskComplexity
 
 _MAX_ATTEMPTS = 2
 
@@ -26,8 +26,14 @@ class OllamaGateway(LLMGateway):
         self._timeout_seconds = timeout_seconds
 
     async def generate_structured(
-        self, *, system_prompt: str, user_prompt: str, schema: type[SchemaT]
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: type[SchemaT],
+        complexity: TaskComplexity = TaskComplexity.SIMPLE,
     ) -> SchemaT:
+        del complexity  # one model, nothing to route between — see base.py
         last_error: Exception | None = None
         for _attempt in range(_MAX_ATTEMPTS):
             try:

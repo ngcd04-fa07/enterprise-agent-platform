@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm_gateway.base import LLMGenerationError
+from app.llm_gateway.base import LLMGenerationError, TaskComplexity
 from app.models.ai_call_trace import AICallStatus, AICallTrace, AICallType
 from app.observability.tracing_embedding_provider import TracingEmbeddingProvider
 from app.observability.tracing_llm_gateway import TracingLLMGateway
@@ -50,6 +50,25 @@ async def test_tracing_llm_gateway_records_success(db_session: AsyncSession) -> 
     assert trace.model == "fake-model-v1"
     assert trace.latency_ms >= 0
     assert trace.error_message is None
+    assert '"complexity": "simple"' in trace.call_metadata
+
+
+async def test_tracing_llm_gateway_records_requested_complexity(
+    db_session: AsyncSession,
+) -> None:
+    fake = FakeLLMGateway()
+    fake.default_response = {"summary": "ok"}
+    gateway = TracingLLMGateway(fake, provider="fake-provider", model="fake-model-v1")
+
+    await gateway.generate_structured(
+        system_prompt="sys",
+        user_prompt="unique-prompt-complex-1",
+        schema=ChunkExtraction,
+        complexity=TaskComplexity.COMPLEX,
+    )
+
+    trace = await _latest_trace(db_session, AICallType.LLM_GENERATE)
+    assert '"complexity": "complex"' in trace.call_metadata
 
 
 async def test_tracing_llm_gateway_records_failure(db_session: AsyncSession) -> None:
