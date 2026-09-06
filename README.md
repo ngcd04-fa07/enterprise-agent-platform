@@ -17,7 +17,7 @@ Fictional use case: commercial insurance underwriting document intelligence — 
 
 Most AI demo projects stop at "call the model and print the answer." This one is built to demonstrate the engineering that has to exist *around* the model in a real product: multi-tenant data isolation, provenance-backed retrieval, typed and validated tool calls, a real Postgres schema with migrations, and a CI pipeline that's actually been made to fail and then fixed — not just written and assumed to work.
 
-It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), and **all 21 stages are now complete**: auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search backed by a real benchmark, a first agentic workflow (automated underwriting triage with deterministic rules, an auditable pipeline, and mandatory human approval), an MCP server exposing all of it as typed tools with zero new trust decisions, AI call tracing, an evaluation harness (deterministic scoring plus versioned-prompt LLM-as-judge), complexity-based model routing between two local LLMs (Stage 16), a CI-integrated eval smoke test (Stage 17), systematic release comparison (Stage 18), production model-policy hardening (Stage 19), a full security/production-readiness hardening pass (Stage 20) — a permanently-idempotent approval endpoint, a global request-body limit enforced at the true ASGI boundary, a rate limiter designed so an attacker can never lock out a victim, dangerous config defaults removed, untrusted-content framing in every LLM prompt — and, finally, deployment groundwork (Stage 21): a real S3-compatible storage backend (works against AWS S3 or MinIO with zero code difference) and multi-replica-safe migrations (a dedicated one-shot migration step, not baked into every container's boot).
+It's built as a staged, reviewable roadmap (Stage 0 → Stage 21), and **all 21 stages are now complete**: auth/RBAC through a working end-to-end retrieval UI, hardened with CI and a full-journey integration test, schema-validated structured extraction from a local LLM, hybrid (semantic + lexical) search backed by a real benchmark, a first agentic workflow (automated underwriting triage with deterministic rules, an auditable pipeline, and mandatory human approval), an MCP server exposing all of it as typed tools with zero new trust decisions, AI call tracing, an evaluation harness (deterministic scoring plus versioned-prompt LLM-as-judge), complexity-based model routing between two local LLMs (Stage 16), a CI-integrated eval smoke test (Stage 17), systematic release comparison (Stage 18), production model-policy hardening (Stage 19), a full security/production-readiness hardening pass (Stage 20) — a permanently-idempotent approval endpoint, a global request-body limit enforced at the true ASGI boundary, a rate limiter designed to prevent account-targeted lockout by keying limits on source context rather than victim identity alone, dangerous config defaults removed, untrusted-content framing in every LLM prompt — and, finally, deployment groundwork (Stage 21): a real S3-compatible storage backend (works against AWS S3 or MinIO with zero code difference) and multi-replica-safe migrations (a dedicated one-shot migration step, not baked into every container's boot).
 
 ## Table of contents
 
@@ -60,9 +60,9 @@ flowchart LR
 
     subgraph Storage
         PG[("PostgreSQL\n+ pgvector (HNSW)\n+ full-text (GIN)")]
-        FS[("Object storage\n(filesystem, swappable)")]
+        FS[("Object storage\nfilesystem / S3-compatible")]
         EMB["Local embedding model\n(fastembed, no API key)"]
-        LLM["Local LLM via Ollama\n(qwen2.5:3b, no API key)"]
+        LLM["Local LLM routing\nQwen 3B / Qwen 14B"]
     end
 
     Browser -->|"same-origin /api/*"| UI
