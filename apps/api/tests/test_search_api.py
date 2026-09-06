@@ -65,6 +65,7 @@ async def test_search_returns_exact_text_match_as_top_result(client: AsyncClient
     response = await client.post(
         f"/submissions/{submission['id']}/search",
         json={"query": "The quick brown fox jumps over the lazy dog."},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
     )
 
     assert response.status_code == 200
@@ -82,7 +83,9 @@ async def test_search_with_no_documents_returns_empty_results(client: AsyncClien
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
 
     response = await client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "anything"}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "anything"},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
     )
 
     assert response.status_code == 200
@@ -95,10 +98,14 @@ async def test_search_requires_submission_in_own_organisation(
     auth_body = await _register(client, email="s2@example.com", organisation_name="Org A")
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
 
-    await _register(second_client, email="s3@example.com", organisation_name="Org B")
+    second_auth_body = await _register(
+        second_client, email="s3@example.com", organisation_name="Org B"
+    )
 
     response = await second_client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "anything"}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "anything"},
+        headers={"X-CSRF-Token": second_auth_body["csrf_token"]},
     )
 
     assert response.status_code == 404
@@ -108,7 +115,11 @@ async def test_search_rejects_empty_query(client: AsyncClient) -> None:
     auth_body = await _register(client, email="s5@example.com", organisation_name="Acme5")
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
 
-    response = await client.post(f"/submissions/{submission['id']}/search", json={"query": ""})
+    response = await client.post(
+        f"/submissions/{submission['id']}/search",
+        json={"query": ""},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
+    )
 
     assert response.status_code == 422
 
@@ -118,7 +129,9 @@ async def test_search_rejects_overlong_query(client: AsyncClient) -> None:
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
 
     response = await client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "x" * 1001}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "x" * 1001},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
     )
 
     assert response.status_code == 422
@@ -127,12 +140,17 @@ async def test_search_rejects_overlong_query(client: AsyncClient) -> None:
 async def test_search_rejects_out_of_range_limit(client: AsyncClient) -> None:
     auth_body = await _register(client, email="s7@example.com", organisation_name="Acme7")
     submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+    headers = {"X-CSRF-Token": auth_body["csrf_token"]}
 
     too_low = await client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "anything", "limit": 0}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "anything", "limit": 0},
+        headers=headers,
     )
     too_high = await client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "anything", "limit": 51}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "anything", "limit": 51},
+        headers=headers,
     )
 
     assert too_low.status_code == 422
@@ -150,8 +168,21 @@ async def test_search_limit_bounds_the_number_of_results(client: AsyncClient) ->
     )
 
     response = await client.post(
-        f"/submissions/{submission['id']}/search", json={"query": "distinct page", "limit": 1}
+        f"/submissions/{submission['id']}/search",
+        json={"query": "distinct page", "limit": 1},
+        headers={"X-CSRF-Token": auth_body["csrf_token"]},
     )
 
     assert response.status_code == 200
     assert len(response.json()["results"]) == 1
+
+
+async def test_search_requires_csrf_token(client: AsyncClient) -> None:
+    auth_body = await _register(client, email="s9@example.com", organisation_name="Acme9")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+
+    response = await client.post(
+        f"/submissions/{submission['id']}/search", json={"query": "anything"}
+    )
+
+    assert response.status_code == 403

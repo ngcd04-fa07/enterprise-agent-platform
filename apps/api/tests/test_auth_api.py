@@ -2,6 +2,8 @@ from typing import Any
 
 from httpx import AsyncClient
 
+from app.core.config import get_settings
+
 REGISTER_PASSWORD = "correct horse battery staple"
 
 
@@ -111,3 +113,59 @@ async def test_logout_revokes_session(client: AsyncClient) -> None:
 
     me_response = await client.get("/auth/me")
     assert me_response.status_code == 401
+
+
+async def test_login_flood_eventually_returns_429_with_retry_after(client: AsyncClient) -> None:
+    """Stage 20: a wrong-password flood must eventually be throttled, not
+    processed forever — every attempt still gets a real password
+    verification up to that point (see AuthService.login's timing-safe
+    design), so this also proves the limiter check runs before that cost
+    is paid indefinitely.
+
+    Every attempt here targets the same account from the same (test)
+    client IP, so the tighter per-(IP, identifier) bucket is the one that
+    actually trips — not the more permissive per-IP bucket, which is
+    sized for "how much login traffic can one source generate at all,"
+    not "how many guesses against one account." See test_rate_limiter.py
+    for the pure-logic proof that a *different* IP guessing the same
+    email is an entirely separate bucket (an attacker can't lock out a
+    victim this way).
+    """
+    await _register(client)
+    client.cookies.clear()
+    max_attempts = get_settings().login_rate_limit_per_identifier_max_attempts
+
+    responses = [
+        await client.post(
+            "/auth/login", json={"email": "owner@example.com", "password": "wrong password"}
+        )
+        for _ in range(max_attempts + 1)
+    ]
+
+    assert all(r.status_code == 401 for r in responses[:max_attempts])
+    last = responses[-1]
+    assert last.status_code == 429
+    assert "Retry-After" in last.headers
+    assert int(last.headers["Retry-After"]) > 0
+
+
+async def test_register_flood_eventually_returns_429(client: AsyncClient) -> None:
+    max_attempts = get_settings().register_rate_limit_per_ip_max_attempts
+
+    responses = []
+    for i in range(max_attempts + 1):
+        responses.append(
+            await client.post(
+                "/auth/register",
+                json={
+                    "email": f"flood{i}@example.com",
+                    "full_name": "Flood",
+                    "password": REGISTER_PASSWORD,
+                    "organisation_name": f"Flood Org {i}",
+                },
+            )
+        )
+
+    assert all(r.status_code == 201 for r in responses[:max_attempts])
+    assert responses[-1].status_code == 429
+    assert "Retry-After" in responses[-1].headers

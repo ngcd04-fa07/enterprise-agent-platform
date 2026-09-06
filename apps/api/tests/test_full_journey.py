@@ -63,6 +63,7 @@ async def test_full_user_journey(client: AsyncClient) -> None:
     search_response = await client.post(
         f"/submissions/{submission_id}/search",
         json={"query": "Revenue grew by twelve percent this quarter."},
+        headers={"X-CSRF-Token": csrf_token},
     )
     assert search_response.status_code == 200
     search_body = search_response.json()

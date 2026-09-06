@@ -15,6 +15,15 @@ class AgentRunNotFoundError(Exception):
     """
 
 
+class AgentRunAlreadyApprovedError(Exception):
+    """Raised on a second approval attempt (Stage 20) — approval is an
+    audit boundary (docs/architecture.md, agentic workflow decision): the
+    original approver/timestamp must be permanent, not silently
+    overwritable by a later call (accidental double-click, replay, or a
+    different admin). Surfaced as 409 Conflict at the route layer.
+    """
+
+
 class AgentRunRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -71,6 +80,12 @@ class AgentRunRepository:
         self, *, organisation_id: uuid.UUID, agent_run_id: uuid.UUID, approved_by_user_id: uuid.UUID
     ) -> AgentRun:
         run = await self.get(organisation_id=organisation_id, agent_run_id=agent_run_id)
+        if run.approved_at is not None:
+            # Never overwrite — the first approval's attribution is
+            # permanent. Checked before any mutation, so a rejected
+            # replay leaves the row (and this session) completely
+            # untouched, not just "unchanged in the end."
+            raise AgentRunAlreadyApprovedError(agent_run_id)
         run.approved_by_user_id = approved_by_user_id
         run.approved_at = datetime.now(UTC)
         await self._session.flush()

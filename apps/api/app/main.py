@@ -16,6 +16,8 @@ from app.api.routes.retrieval import router as retrieval_router
 from app.api.routes.submissions import router as submissions_router
 from app.core.config import get_settings
 from app.embeddings.factory import get_embedding_provider
+from app.security.body_size_limit import BodySizeLimitMiddleware
+from app.security.headers import SecurityHeadersMiddleware
 
 settings = get_settings()
 
@@ -45,6 +47,13 @@ if settings.api_cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# Added last (outermost — see Starlette's middleware ordering: the last
+# one registered wraps everything else, so it sees a request first and a
+# response last) so an oversized body is rejected before CORS or anything
+# else in the stack has to think about it.
+app.add_middleware(SecurityHeadersMiddleware, enable_hsts=settings.environment != "development")
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 
 
 @app.exception_handler(IntegrityError)

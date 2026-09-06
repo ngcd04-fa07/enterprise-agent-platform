@@ -15,6 +15,14 @@ COPY . .
 # runtime environment variable.
 ARG API_ORIGIN
 ENV API_ORIGIN=$API_ORIGIN
+# Same gotcha, same fix (Stage 20): headers() is baked into the routes
+# manifest at build time exactly like rewrites() — without this, the
+# HSTS gate in next.config.ts would read `process.env.ENVIRONMENT` as
+# unset during `docker build` (not "development"), bake in as
+# "production" unconditionally, and emit HSTS even for this dev/demo
+# compose deployment.
+ARG ENVIRONMENT
+ENV ENVIRONMENT=$ENVIRONMENT
 RUN npm run build
 
 FROM base AS run

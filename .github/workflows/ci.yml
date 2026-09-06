@@ -42,7 +42,7 @@ jobs:
         run: alembic upgrade head
         env:
           DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
-          SESSION_SECRET: ci-test-secret
+          SESSION_SECRET: ci-test-secret-with-at-least-32-characters
       - name: Eval regression-comparison tests (Stage 18)
         # Pure logic, no DB/app dependency at all (evals/comparison.py) —
         # can run at any point in the job, but grouped here with the other
@@ -69,12 +69,20 @@ jobs:
         run: python3 -m evals.smoke_test
         env:
           DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
-          SESSION_SECRET: ci-test-secret
+          SESSION_SECRET: ci-test-secret-with-at-least-32-characters
       - name: Test (pytest)
         run: pytest
         env:
           DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
-          SESSION_SECRET: ci-test-secret
+          SESSION_SECRET: ci-test-secret-with-at-least-32-characters
+      - name: Dependency audit (pip-audit)
+        # Blocking (Stage 20): a real finding here is an exploitable
+        # dependency vulnerability, not ecosystem noise — this project's
+        # backend dependency tree is small and has no accepted findings
+        # today. If one shows up that's genuinely unfixable/inapplicable,
+        # document it explicitly here rather than silencing the whole
+        # step.
+        run: pip-audit
 
   frontend:
     runs-on: ubuntu-latest
@@ -96,6 +104,26 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Dependency audit (npm audit)
+        # Non-blocking, deliberately (Stage 20) — not because audit
+        # findings don't matter, but because the two current findings
+        # (postcss XSS/path-traversal, sharp/libvips CVEs) are both
+        # transitive dependencies of `next` with no fix available short
+        # of a next@16 major upgrade (confirmed: even the latest next@15.x
+        # patch still bundles the same vulnerable postcss/sharp — `npm
+        # audit fix --force` is the only automated path npm offers, and
+        # this project does not take that path just to zero out a number).
+        # Neither is reachable through this app's actual runtime surface:
+        # postcss only runs at build time, and sharp is next/image's
+        # optional runtime image-optimizer, which this app doesn't use
+        # anywhere (grepped: no `next/image` import in apps/web/src).
+        # `continue-on-error` keeps this visible on every run (a genuinely
+        # new/different finding still shows in the log for a human to
+        # read) without failing CI on a known, accepted, non-exploitable
+        # gap — the alternative is a permanently-red check that teaches
+        # everyone to ignore it, which is worse than not running it.
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
   docker-compose:
     runs-on: ubuntu-latest
@@ -107,7 +135,7 @@ jobs:
           POSTGRES_USER=enterprise_agent
           POSTGRES_PASSWORD=ci-test-password
           POSTGRES_DB=enterprise_agent
-          SESSION_SECRET=ci-test-session-secret
+          SESSION_SECRET=ci-test-session-secret-32-chars-min
           EOF
       - name: Build and start the stack
         run: docker compose up --build -d

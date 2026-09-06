@@ -98,7 +98,7 @@ async def upload_document(
     # Synchronous for now — see IngestionService docstring for why. A
     # parsing failure surfaces as document.status == "failed" in the
     # response, not as a failed upload: the file is safely stored either way.
-    document = await IngestionService(db, storage, embeddings).ingest_document(document)
+    document = await IngestionService(db, storage, embeddings, settings).ingest_document(document)
 
     return DocumentRead.model_validate(document)
 

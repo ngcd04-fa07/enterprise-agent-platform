@@ -196,6 +196,42 @@ async def test_admin_can_approve_a_run(client: AsyncClient, llm_gateway: FakeLLM
     assert body["approved_at"] is not None
 
 
+async def test_second_approval_is_rejected_and_leaves_the_first_unchanged(
+    client: AsyncClient, llm_gateway: FakeLLMGateway
+) -> None:
+    """Stage 20: approval is an audit boundary — a replayed/duplicate
+    approve call must never silently reassign who approved a run or when.
+    """
+    llm_gateway.default_response = {"summary": "ok"}
+    auth_body = await _register(client, email="ag5b@example.com", organisation_name="Acme5b")
+    submission = await _create_submission(client, csrf_token=auth_body["csrf_token"])
+    run = (
+        await client.post(
+            f"/submissions/{submission['id']}/agent-runs",
+            headers={"X-CSRF-Token": auth_body["csrf_token"]},
+        )
+    ).json()
+
+    first = await client.post(
+        f"/agent-runs/{run['id']}/approve", headers={"X-CSRF-Token": auth_body["csrf_token"]}
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = await client.post(
+        f"/agent-runs/{run['id']}/approve", headers={"X-CSRF-Token": auth_body["csrf_token"]}
+    )
+    assert second.status_code == 409
+
+    # The persisted record must be exactly what the first approval wrote —
+    # not just "still approved," but logically unchanged by the rejected
+    # replay: same approver, same timestamp.
+    current = await client.get(f"/agent-runs/{run['id']}")
+    current_body = current.json()
+    assert current_body["approved_by_user_id"] == first_body["approved_by_user_id"]
+    assert current_body["approved_at"] == first_body["approved_at"]
+
+
 async def test_underwriter_cannot_approve_a_run(
     client: AsyncClient, second_client: AsyncClient, db_session: AsyncSession
 ) -> None:

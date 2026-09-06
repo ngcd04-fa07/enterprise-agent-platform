@@ -33,7 +33,7 @@ whatever database `DATABASE_URL` points at.
 ```bash
 source apps/api/.venv/bin/activate
 DATABASE_URL=postgresql+asyncpg://enterprise_agent:<password>@localhost:5432/enterprise_agent \
-  SESSION_SECRET=any-value-unused-by-this-script \
+  SESSION_SECRET=any-32-char-value-unused-by-this-script \
   python3 -m benchmarks.retrieval.run
 ```
 

@@ -208,3 +208,44 @@ async def test_extraction_requires_submission_in_own_organisation(
 
     assert extract_response.status_code == 404
     assert get_response.status_code == 404
+
+
+async def test_org_b_cannot_read_org_as_real_extracted_field_values(
+    client: AsyncClient, second_client: AsyncClient, llm_gateway: FakeLLMGateway
+) -> None:
+    """Stage 20 adversarial check: not just "a request for someone else's
+    submission id 404s" (already proven above on an empty submission),
+    but that when real, sensitive field values actually exist, guessing
+    the id returns zero trace of them — not a redacted/partial response,
+    a plain 404 with no fields array at all.
+    """
+    page_text = "Submission for Org A Secret Holdings LLC."
+    llm_gateway.responses[page_text] = {"named_insured": "Org A Secret Holdings LLC."}
+
+    org_a_body = await _register(client, email="ex8a@example.com", organisation_name="Org A8")
+    submission = await _create_submission(client, csrf_token=org_a_body["csrf_token"])
+    pdf = build_minimal_pdf([page_text])
+    await _upload(
+        client, submission_id=submission["id"], csrf_token=org_a_body["csrf_token"], pdf=pdf
+    )
+    extracted = await client.post(
+        f"/submissions/{submission['id']}/extract",
+        headers={"X-CSRF-Token": org_a_body["csrf_token"]},
+    )
+    assert extracted.status_code == 200
+    assert extracted.json()["fields"][0]["value"] == "Org A Secret Holdings LLC."
+
+    org_b_body = await _register(
+        second_client, email="ex8b@example.com", organisation_name="Org B8"
+    )
+
+    get_response = await second_client.get(f"/submissions/{submission['id']}/extraction")
+    extract_response = await second_client.post(
+        f"/submissions/{submission['id']}/extract",
+        headers={"X-CSRF-Token": org_b_body["csrf_token"]},
+    )
+
+    assert get_response.status_code == 404
+    assert extract_response.status_code == 404
+    assert "Org A Secret Holdings LLC." not in get_response.text
+    assert "Org A Secret Holdings LLC." not in extract_response.text

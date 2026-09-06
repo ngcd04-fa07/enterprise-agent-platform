@@ -10,7 +10,11 @@ from app.llm_gateway.base import LLMGateway
 from app.llm_gateway.factory import get_llm_gateway
 from app.models.agent import AgentRun
 from app.models.membership import MembershipRole, OrganisationMembership
-from app.repositories.agent_run_repository import AgentRunNotFoundError, AgentRunRepository
+from app.repositories.agent_run_repository import (
+    AgentRunAlreadyApprovedError,
+    AgentRunNotFoundError,
+    AgentRunRepository,
+)
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.schemas.agent import AgentRunRead, AgentToolCallRead
 from app.services.agent_service import AgentService
@@ -136,4 +140,8 @@ async def approve_agent_run(
         )
     except AgentRunNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent run not found") from exc
+    except AgentRunAlreadyApprovedError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This agent run has already been approved"
+        ) from exc
     return await _build_run_read(db, organisation_id=membership.organisation_id, run=run)

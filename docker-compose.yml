@@ -4,10 +4,18 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-enterprise_agent}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-enterprise_agent}
+      # No silent weak default (Stage 20) — matches SESSION_SECRET's
+      # existing fail-loudly pattern below. A missing .env value used to
+      # fall back to the literal password published in this repo.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:-enterprise_agent}
     ports:
-      - "5432:5432"
+      # Bound to localhost only (Stage 20) — this is a local dev/demo
+      # compose file, not a deployment topology with its own network
+      # boundary; the previous "5432:5432" published Postgres to every
+      # interface on the host by default. Still reachable at
+      # localhost:5432 for local `psql`/tooling.
+      - "127.0.0.1:5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +29,7 @@ services:
       context: ./apps/api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_agent}:${POSTGRES_PASSWORD:-enterprise_agent}@db:5432/${POSTGRES_DB:-enterprise_agent}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_agent}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-enterprise_agent}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
       ENVIRONMENT: development
       STORAGE_ROOT: /data/documents
@@ -38,9 +46,14 @@ services:
       context: ./apps/web
       args:
         API_ORIGIN: http://api:8000
+        # Must be a build arg, not just the environment: entry below —
+        # see the Dockerfile's comment on why (same rewrites()/headers()
+        # baked-at-build-time behavior as API_ORIGIN).
+        ENVIRONMENT: development
     restart: unless-stopped
     environment:
       API_ORIGIN: http://api:8000
+      ENVIRONMENT: development
     ports:
       - "3000:3000"
     depends_on:

@@ -27,6 +27,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
     "mypy>=1.13",
+    "pip-audit>=2.7",
 ]
 
 [build-system]
@@ -41,7 +42,18 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+# S101 (assert) fires on every pytest `assert` — that's how pytest tests
+# are written, not a real risk in a test file. S105/S106/S107 (possible
+# hardcoded password/secret) fire on this project's own test fixtures and
+# fake credentials (e.g. "correct horse battery staple", fake session
+# tokens) — genuinely not secrets, just string literals that happen to
+# match the heuristic. Reviewed per-finding, not a blanket "S is noisy,
+# disable it": every other S rule stays enabled, including in tests.
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "S107"]
+"evals/*" = ["S101", "S105", "S106", "S107"]
+"benchmarks/*" = ["S101", "S105", "S106", "S107"]
 
 [tool.mypy]
 python_version = "3.12"

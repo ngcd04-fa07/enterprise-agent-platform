@@ -98,6 +98,31 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     await connection.close()
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters() -> None:
+    """The login/register rate limiters (Stage 20) are process-wide
+    `@lru_cache` singletons — by design, so their in-memory state
+    actually persists across requests within one running process. That's
+    exactly wrong for a test *suite*, though: many tests each register/
+    log in through the same ASGITransport test client, which reports the
+    same client IP for all of them, so without a reset every test session
+    would eventually trip the real limiter after enough tests ran,
+    regardless of which specific test happened to be running. Clearing
+    the cache before each test forces a fresh limiter instance (with a
+    fresh, empty bucket) the next time a route calls the factory
+    function, isolating tests from each other's request volume.
+    """
+    from app.api.routes.auth import (
+        _login_identifier_limiter,
+        _login_ip_limiter,
+        _register_ip_limiter,
+    )
+
+    _login_ip_limiter.cache_clear()
+    _login_identifier_limiter.cache_clear()
+    _register_ip_limiter.cache_clear()
+
+
 @pytest.fixture
 def object_storage(tmp_path: Path) -> ObjectStorage:
     """A throwaway filesystem storage root per test — never the real

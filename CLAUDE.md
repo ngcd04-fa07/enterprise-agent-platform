@@ -120,6 +120,8 @@ ends with a stop point for explicit user go-ahead.
 - Backend format check: `cd apps/api && ruff format --check .`
 - Backend type check: `cd apps/api && mypy app`
 - Backend tests: `cd apps/api && pytest`
+- Backend dependency audit: `cd apps/api && pip-audit` (Stage 20; also
+  runs in CI, blocking)
 - Local LLMs for structured extraction/triage (Stage 9+, routed Stage 16+):
   `ollama serve` then `ollama pull qwen2.5:3b && ollama pull qwen2.5:14b` —
   optional; the app runs without them, extraction/triage just return

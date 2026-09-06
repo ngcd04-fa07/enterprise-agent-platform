@@ -2,6 +2,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.embeddings.base import EmbeddingProvider
 from app.ingestion.chunking import chunk_text
 from app.ingestion.pdf_parser import extract_pages
@@ -15,6 +16,18 @@ from app.storage.base import ObjectStorage
 logger = logging.getLogger(__name__)
 
 
+class DocumentTooLargeToIngestError(Exception):
+    """Raised when a parsed PDF exceeds a configured resource ceiling
+    (page count or total chunk count — see Settings.max_pdf_pages/
+    max_chunks_per_document, Stage 20). File size alone doesn't bound
+    either: many small pages fit in a small file, and a single
+    pathological page's text can still produce far more chunks than a
+    reasonable document would. Caught by the same generic handler as any
+    other ingestion failure below — surfaces as a clean `status: "failed"`
+    document, not a crash or an unbounded synchronous run.
+    """
+
+
 class IngestionService:
     """Parses a stored PDF into pages, chunks each page's text, embeds
     every chunk, and persists all three with provenance (document_id,
@@ -25,11 +38,16 @@ class IngestionService:
     """
 
     def __init__(
-        self, db: AsyncSession, storage: ObjectStorage, embeddings: EmbeddingProvider
+        self,
+        db: AsyncSession,
+        storage: ObjectStorage,
+        embeddings: EmbeddingProvider,
+        settings: Settings,
     ) -> None:
         self._db = db
         self._storage = storage
         self._embeddings = embeddings
+        self._settings = settings
         self._documents = DocumentRepository(db)
         self._pages = DocumentPageRepository(db)
         self._chunks = DocumentChunkRepository(db)
@@ -54,6 +72,11 @@ class IngestionService:
             async with self._db.begin_nested():
                 data = await self._storage.get_object(document.storage_key)
                 page_texts = extract_pages(data)
+                if len(page_texts) > self._settings.max_pdf_pages:
+                    raise DocumentTooLargeToIngestError(
+                        f"{len(page_texts)} pages exceeds the {self._settings.max_pdf_pages}-page "
+                        "limit"
+                    )
 
                 pages_with_chunks: list[tuple[DocumentPage, list[tuple[str, int, int]]]] = []
                 for page_number, page_text in enumerate(page_texts, start=1):
@@ -70,6 +93,11 @@ class IngestionService:
                     for page, chunks in pages_with_chunks
                     for text, start_char, end_char in chunks
                 ]
+                if len(chunk_specs) > self._settings.max_chunks_per_document:
+                    raise DocumentTooLargeToIngestError(
+                        f"{len(chunk_specs)} chunks exceeds the "
+                        f"{self._settings.max_chunks_per_document}-chunk limit"
+                    )
 
                 embeddings = (
                     await self._embeddings.embed_documents([spec[1] for spec in chunk_specs])

@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import get_current_membership
+from app.auth.deps import get_current_membership, require_csrf
 from app.db.session import get_db_session
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
@@ -17,7 +17,14 @@ from app.services.submission_service import SubmissionNotFoundError, SubmissionS
 router = APIRouter(tags=["retrieval"])
 
 
-@router.post("/submissions/{submission_id}/search", response_model=SearchResponse)
+@router.post(
+    "/submissions/{submission_id}/search",
+    response_model=SearchResponse,
+    dependencies=[Depends(require_csrf)],
+)
+# Search doesn't mutate anything — CSRF is added here for uniformity of
+# POST/session request handling (every other POST/PATCH route requires
+# it), not because a cross-site search request could itself do damage.
 async def search_submission(
     submission_id: UUID,
     payload: SearchRequest,
