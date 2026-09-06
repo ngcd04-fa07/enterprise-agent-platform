@@ -146,3 +146,128 @@ td {
   color: var(--muted-text);
   margin-bottom: 0.375rem;
 }
+
+.demo-banner {
+  background: #eff6ff;
+  color: #1e293b;
+  border-bottom: 1px solid var(--accent);
+  padding: 0.75rem 1.5rem;
+  font-size: 0.875rem;
+}
+
+.demo-banner code {
+  color: #1e293b;
+}
+
+.demo-banner p {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+.demo-banner-tag {
+  display: inline-block;
+  background: var(--accent);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  margin-right: 0.5rem;
+}
+
+.overview {
+  margin: 2rem 0;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.overview-item {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.overview-item h3 {
+  font-size: 1rem;
+  margin: 0 0 0.375rem;
+}
+
+.overview-item p {
+  margin: 0;
+}
+
+/* Wide tables (documents, extraction, trace) scroll within themselves on
+   narrow viewports instead of forcing the whole page to scroll sideways. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.evidence-panel {
+  background: #f9fafb;
+  color: #1e293b;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 0.25rem 0;
+}
+
+.triage-result {
+  margin-top: 1rem;
+}
+
+.approval-state {
+  margin-top: 0.75rem;
+}
+
+.flag-list {
+  margin: 0.75rem 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+.flag-badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  border: 1px solid var(--border-color);
+  font-weight: 600;
+}
+
+.flag-approve,
+.flag-improved,
+.flag-unchanged {
+  color: #067647;
+  border-color: #067647;
+}
+
+.flag-refer,
+.flag-regressed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.status-completed {
+  color: #067647;
+  border-color: #067647;
+}
+
+@media (max-width: 40rem) {
+  main {
+    padding: 1.5rem 1rem;
+  }
+
+  .page-header {
+    flex-wrap: wrap;
+  }
+
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}

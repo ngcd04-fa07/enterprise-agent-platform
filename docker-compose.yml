@@ -72,10 +72,14 @@ services:
         # see the Dockerfile's comment on why (same rewrites()/headers()
         # baked-at-build-time behavior as API_ORIGIN).
         ENVIRONMENT: development
+        # Off for local dev/CI — only the public demo deployment sets
+        # this to "true" (see docs/deployment.md).
+        NEXT_PUBLIC_DEMO_MODE: "false"
     restart: unless-stopped
     environment:
       API_ORIGIN: http://api:8000
       ENVIRONMENT: development
+      NEXT_PUBLIC_DEMO_MODE: "false"
     ports:
       - "3000:3000"
     depends_on:

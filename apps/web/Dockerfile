@@ -23,6 +23,15 @@ ENV API_ORIGIN=$API_ORIGIN
 # compose deployment.
 ARG ENVIRONMENT
 ENV ENVIRONMENT=$ENVIRONMENT
+# Public-demo frontend polish: whether to show the demo banner, pre-fill
+# the shared demo login, and disable the registration form. A client-
+# visible label only — Settings.demo_mode on the backend (app/core/
+# config.py) is what actually enforces registration-disabled and rate
+# limiting, regardless of what this says. Next.js inlines NEXT_PUBLIC_*
+# vars into the client bundle at build time (same rule as API_ORIGIN/
+# ENVIRONMENT above), so this needs the same build-arg treatment.
+ARG NEXT_PUBLIC_DEMO_MODE
+ENV NEXT_PUBLIC_DEMO_MODE=$NEXT_PUBLIC_DEMO_MODE
 RUN npm run build
 
 FROM base AS run

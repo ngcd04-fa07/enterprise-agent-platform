@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
+import { PlatformOverview } from "@/components/PlatformOverview";
 import { useAuth } from "@/lib/auth-context";
 
 export default function HomePage() {
@@ -25,7 +26,7 @@ export default function HomePage() {
   }
 
   return (
-    <main>
+    <main className="wide">
       <h1>Enterprise Agent Platform</h1>
       <p>
         Evidence-grounded underwriting document intelligence — upload submission documents,
@@ -34,6 +35,7 @@ export default function HomePage() {
       <p>
         <Link href="/login">Log in</Link> · <Link href="/register">Register</Link>
       </p>
+      <PlatformOverview />
     </main>
   );
 }

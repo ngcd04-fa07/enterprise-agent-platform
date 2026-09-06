@@ -7,12 +7,13 @@ import type { FormEvent } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { DEMO_ACCOUNT_EMAIL, DEMO_ACCOUNT_PASSWORD, DEMO_MODE } from "@/lib/demo";
 
 export default function LoginPage() {
   const router = useRouter();
   const { refresh } = useAuth();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(DEMO_MODE ? DEMO_ACCOUNT_EMAIL : "");
+  const [password, setPassword] = useState(DEMO_MODE ? DEMO_ACCOUNT_PASSWORD : "");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -34,6 +35,12 @@ export default function LoginPage() {
   return (
     <main>
       <h1>Log in</h1>
+      {DEMO_MODE && (
+        <p className="muted">
+          Demo credentials are pre-filled below — this is the one shared, read-mostly account for
+          this public demo.
+        </p>
+      )}
       <form onSubmit={handleSubmit}>
         <label>
           Email
@@ -58,9 +65,11 @@ export default function LoginPage() {
           {submitting ? "Logging in..." : "Log in"}
         </button>
       </form>
-      <p className="muted">
-        Need an account? <Link href="/register">Register</Link>
-      </p>
+      {!DEMO_MODE && (
+        <p className="muted">
+          Need an account? <Link href="/register">Register</Link>
+        </p>
+      )}
     </main>
   );
 }

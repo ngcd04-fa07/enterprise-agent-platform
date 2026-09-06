@@ -153,20 +153,25 @@ Create a second Render **Web Service**, same repo, Docker runtime, Dockerfile
 path `apps/web/Dockerfile`.
 
 **Build arguments** (Render's dashboard has a Docker Build Args section for
-Docker-based services): both `API_ORIGIN` and `ENVIRONMENT` must be set as
-**build args**, not just runtime env vars — `apps/web/next.config.ts` bakes
-its `rewrites()` destination and `headers()` CSP/HSTS logic in at build
-time, a documented gotcha this project has hit twice before (Stage 7,
-Stage 20 — see `docs/architecture.md`).
+Docker-based services): all three below must be set as **build args**, not
+just runtime env vars — `apps/web/next.config.ts` bakes its `rewrites()`
+destination and `headers()` CSP/HSTS logic in at build time, and
+`NEXT_PUBLIC_DEMO_MODE` is inlined into the client bundle the same way — a
+documented gotcha this project has hit before (Stage 7, Stage 20 — see
+`docs/architecture.md`).
 
 | Build arg | Value |
 |---|---|
 | `API_ORIGIN` | the API service's Render URL from Step 4, e.g. `https://enterprise-agent-api.onrender.com` |
 | `ENVIRONMENT` | `production` |
+| `NEXT_PUBLIC_DEMO_MODE` | `true` |
 
-Set the same two as **runtime** environment variables too (belt-and-braces;
+Set the same three as **runtime** environment variables too (belt-and-braces;
 some of Next.js's own server-side code reads `process.env` at request time,
-not just at build time).
+not just at build time). `NEXT_PUBLIC_DEMO_MODE` only controls the frontend's
+banner/login-page text — it's the API service's own `DEMO_MODE` (Step 4)
+that actually disables registration and rate-limits extraction/triage, so
+don't set one without the other.
 
 ## Step 6 — Run migrations once, then seed the demo data
 
@@ -206,15 +211,27 @@ once, though, since they're specific to this app:
 Before sharing the link:
 
 - [ ] `GET /health` on the API service returns `database: "ok"`.
-- [ ] The web service's landing page loads and its login form is reachable.
-- [ ] Logging in as `demo@example.com` works and shows the seeded submission.
+- [ ] The web service's landing page loads, shows the platform-overview
+      section, and its login form is reachable.
+- [ ] The demo banner appears at the top of every page (confirms
+      `NEXT_PUBLIC_DEMO_MODE=true` actually took at build time).
+- [ ] Logging in as `demo@example.com` (pre-filled on the login form) works
+      and shows the seeded submission.
 - [ ] The submission's three documents (application, financial summary, loss
-      history) are viewable/downloadable.
+      history) are viewable/downloadable via "Open PDF".
 - [ ] Search returns results against the seeded documents.
+- [ ] Extraction shows 4 of 5 fields with a "View evidence" link that
+      displays the actual cited source page text (broker is expected to be
+      absent — see docs/architecture.md's "Public demo deployment" entry).
+- [ ] Triage shows a recommendation, the low-severity missing-broker flag,
+      and the approval control (only for an admin — the seeded demo account
+      is one).
 - [ ] Re-running extraction/triage from the UI works once, and returns 429
       (with a clear message, not a raw error) once
       `DEMO_LLM_RATE_LIMIT_PER_IP_MAX_ATTEMPTS` is exceeded from the same IP.
-- [ ] `POST /auth/register` returns 403 (registration is really disabled).
+- [ ] The registration page shows the "disabled" notice instead of a form,
+      and `POST /auth/register` itself returns 403 (registration is really
+      disabled server-side, not just hidden in the UI).
 - [ ] A fresh browser/incognito session cannot see any data belonging to a
       different, real organisation — there shouldn't be one on this
       deployment at all, but confirm the demo org is the only one present:

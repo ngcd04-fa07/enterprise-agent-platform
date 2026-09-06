@@ -7,6 +7,7 @@ import type { FormEvent } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { DEMO_ACCOUNT_EMAIL, DEMO_ACCOUNT_PASSWORD, DEMO_MODE } from "@/lib/demo";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -36,6 +37,22 @@ export default function RegisterPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (DEMO_MODE) {
+    return (
+      <main>
+        <h1>Registration disabled</h1>
+        <p className="muted">
+          This is a public demo with synthetic data only — registration is disabled to keep it
+          that way. Log in with the shared demo account instead: <code>{DEMO_ACCOUNT_EMAIL}</code>{" "}
+          / <code>{DEMO_ACCOUNT_PASSWORD}</code>.
+        </p>
+        <p>
+          <Link href="/login">Go to login</Link>
+        </p>
+      </main>
+    );
   }
 
   return (
