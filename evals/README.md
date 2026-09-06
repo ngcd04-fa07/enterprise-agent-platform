@@ -71,12 +71,84 @@ merge/scoring/judging logic. A regression here (a renamed field, a broken
 merge, a changed call signature) fails CI immediately instead of only
 surfacing the next time someone runs the real evaluators by hand.
 
+Since Stage 18, it also drives `record_run.record_with_llm` and
+`compare_runs.compare_runs` directly (the same reusable functions the two
+CLIs above wrap) with two fake runs — one perfect, one deliberately
+regressed on the real `fields_split_across_pages` case's second page —
+and asserts the persisted comparison correctly flags a REGRESSED slice.
+This keeps the "no real model in CI" constraint intact for the
+comparison machinery too, and cleans up its own persisted rows afterward
+regardless of outcome (a smoke test's rows aren't real comparison
+history worth keeping).
+
 ```bash
 source apps/api/.venv/bin/activate
 DATABASE_URL=... SESSION_SECRET=... python3 -m evals.smoke_test
 ```
 
-## Why `evals/` and not `benchmarks/`
+## `comparison.py`, `record_run.py`, `compare_runs.py` — release comparison (Stage 18)
+
+Systematic baseline-vs-candidate comparison on top of the two evaluators
+above: did a change (a new model, a new prompt, a routing change) make
+things better or worse, in aggregate *and* on every slice? An aggregate
+improvement is never allowed to mask a slice-level regression — see
+`comparison.py`'s `compare()`, and the worked example in
+`test_comparison.py` (an aggregate 89%→92% "improvement" with one slice
+regressing 87%→71% is still, correctly, an overall REGRESSED verdict).
+
+**Record a run, then compare two of them:**
+
+```bash
+source apps/api/.venv/bin/activate
+DATABASE_URL=... SESSION_SECRET=... python3 -m evals.record_run \
+    --evaluator extraction --label baseline
+DATABASE_URL=... SESSION_SECRET=... python3 -m evals.record_run \
+    --evaluator extraction --label candidate
+DATABASE_URL=... SESSION_SECRET=... python3 -m evals.compare_runs \
+    --evaluator extraction --baseline baseline --candidate candidate
+```
+
+`--baseline`/`--candidate` accept either a run id or a label — a label
+resolves to its most recent matching run (labels are deliberately not
+unique; the same label, e.g. "baseline", is expected to be re-recorded
+many times as the evaluated code changes), with a printed note if more
+than one run shares it. `compare_runs` exits non-zero on an overall
+REGRESSED verdict, so it can gate a release, not just report on one.
+
+**A real, non-fabricated model-version comparison, since this repo
+already has two real local models (Stage 16):**
+
+```bash
+python3 -m evals.record_run --evaluator extraction --label baseline --model qwen2.5:3b
+python3 -m evals.record_run --evaluator extraction --label candidate --model qwen2.5:14b
+python3 -m evals.compare_runs --evaluator extraction --baseline baseline --candidate candidate
+```
+
+`--model` bypasses Stage 16's `RoutingLLMGateway` entirely and talks to
+one named Ollama model directly. Run for real against this project's
+4-case extraction dataset: the larger `qwen2.5:14b` model actually scored
+*worse* than `qwen2.5:3b` (90%→85% aggregate, 80%→60% on the
+`multi_page` slice) — reported here as found, not smoothed over. One
+manual run on a tiny dataset isn't a general claim about either model;
+it's exactly the kind of result this tooling exists to surface plainly.
+**This is a manual/optional demonstration only — CI never runs a real
+model.**
+
+**Persistence and semantics, briefly** (see `docs/architecture.md`'s
+Stage 18 decision for the full writeup): three tables
+(`evaluation_runs`, `evaluation_case_results`, `evaluation_comparisons`),
+tenant-unscoped like `ai_call_traces`, for the same reason. Metric
+*direction* is explicit, not assumed: `KNOWN_METRIC_DIRECTIONS` in
+`comparison.py` lists which metrics are higher-is-better (all of them,
+today — `correct`, `faithful`); an unregistered metric is reported
+`UNKNOWN_DIRECTION` rather than silently treated as higher-is-better,
+since a future metric like latency or error rate is lower-is-better and
+guessing wrong would silently invert its regression/improvement calls. A
+metric or slice present on only one side of a comparison is reported
+`MISSING_IN_BASELINE`/`MISSING_IN_CANDIDATE`, never treated as 0.
+Comparing across evaluators (extraction vs. triage) is rejected outright.
+
+## `smoke_test.py` — CI-safe harness check, not a model-quality measurement
 
 Different purpose despite similar shape (a labeled dataset + a runner +
 a metric). `benchmarks/retrieval/` (Stage 11) tunes *ranking quality* —
@@ -87,11 +159,20 @@ roadmap names them as distinct stages (11 vs. 15) for the same reason.
 
 ## Common design notes
 
-All three scripts seed their fixtures inside one transaction that's
-always rolled back — a run never leaves data behind in whatever database
+All scripts that seed fixtures do so inside one transaction that's always
+rolled back — a run never leaves data behind in whatever database
 `DATABASE_URL` points at (verified via direct `psql` inspection after a
 real run of each). `extraction/run.py` and `triage_faithfulness/run.py`
 run against the real Ollama models, no fakes — the point is measuring
 real behavior. `smoke_test.py` is the deliberate exception, using a fake
 model so it can run without Ollama at all — see above for why that's a
 different, complementary kind of check, not a replacement.
+
+`record_run.py` and `compare_runs.py` (Stage 18) are different in kind:
+they *persist* real data (an `EvaluationRun` and its case results, a
+comparison) rather than rolling it back — that's the whole point, a
+durable comparison history. `comparison.py`'s own logic has zero DB
+dependency and is tested with plain, fast pytest tests in
+`test_comparison.py` — run via `pytest evals/` from the repo root (not
+folded into `apps/api`'s own `pytest`, which is scoped to
+`apps/api/tests` only, to avoid a reverse-direction import).

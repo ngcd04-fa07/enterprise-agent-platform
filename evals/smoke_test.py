@@ -19,16 +19,24 @@ Usage (from the repo root, with apps/api's venv active):
 
 import asyncio
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "api"))
 
 from app.core.config import get_settings  # noqa: E402
 from app.db.session import get_sessionmaker  # noqa: E402
+from app.repositories.evaluation_comparison_repository import (  # noqa: E402
+    EvaluationComparisonRepository,
+)
+from app.repositories.evaluation_run_repository import EvaluationRunRepository  # noqa: E402
 from tests.fake_llm_gateway import FakeLLMGateway  # noqa: E402
 
+from evals.compare_runs import compare_runs  # noqa: E402
+from evals.comparison import OverallStatus, RowStatus  # noqa: E402
 from evals.extraction.dataset import EXTRACTION_CASES  # noqa: E402
 from evals.extraction.run import run_extraction_eval  # noqa: E402
+from evals.record_run import record_with_llm  # noqa: E402
 from evals.triage_faithfulness.dataset import TRIAGE_SCENARIOS  # noqa: E402
 from evals.triage_faithfulness.run import run_triage_eval  # noqa: E402
 
@@ -91,8 +99,115 @@ async def _check_triage_harness() -> list[str]:
     return problems
 
 
+async def _check_comparison_harness() -> list[str]:
+    """Records two fake-model extraction runs — a baseline that answers
+    every chunk perfectly, and a candidate identical except it fails to
+    find anything on the second page of "fields_split_across_pages" (a
+    real dataset case tagged "multi_page"/"has_data", not a fabricated
+    slice) — then confirms evals/compare_runs.py's persisted comparison
+    correctly flags a REGRESSED slice. This is the exact record -> persist
+    -> load -> compare -> persist-the-comparison path evals/record_run.py
+    and evals/compare_runs.py expose for real, manual use (Stage 18),
+    exercised here deterministically so it runs in CI with no Ollama —
+    the same relationship Stage 17's two checks above have to the real
+    evaluators. Cleans up its own persisted rows afterward, regardless of
+    outcome: this is a smoke test, not real comparison history worth
+    keeping.
+    """
+    split_case = next(c for c in EXTRACTION_CASES if c.key == "fields_split_across_pages")
+
+    baseline_fake = FakeLLMGateway()
+    candidate_fake = FakeLLMGateway()
+    for case in EXTRACTION_CASES:
+        if case.key == split_case.key:
+            continue  # given a realistic per-page split below instead
+        for page_text in case.page_texts:
+            # Every page of a single-page case gets the case's full
+            # expected dict — harmless here since each such case only
+            # has one page, so there's no cross-page value to leak.
+            baseline_fake.responses[page_text] = dict(case.expected)
+            candidate_fake.responses[page_text] = dict(case.expected)
+
+    # split_case's two pages must each reveal only the fields that page
+    # actually states (see evals/extraction/dataset.py) — giving both
+    # pages the *entire* expected dict, as above, would let page one alone
+    # satisfy every field regardless of what page two says, making it
+    # impossible to regress page two's contribution at all.
+    page_one_fields = {
+        "named_insured": split_case.expected["named_insured"],
+        "business_description": split_case.expected["business_description"],
+        "requested_effective_date": None,
+        "requested_coverage_limit": None,
+        "broker_or_agent_name": None,
+    }
+    page_two_fields = {
+        "named_insured": None,
+        "business_description": None,
+        "requested_effective_date": split_case.expected["requested_effective_date"],
+        "requested_coverage_limit": split_case.expected["requested_coverage_limit"],
+        "broker_or_agent_name": split_case.expected["broker_or_agent_name"],
+    }
+    baseline_fake.responses[split_case.page_texts[0]] = page_one_fields
+    baseline_fake.responses[split_case.page_texts[1]] = page_two_fields
+    candidate_fake.responses[split_case.page_texts[0]] = page_one_fields
+    candidate_fake.responses[split_case.page_texts[1]] = {}  # deliberately regress this chunk
+
+    label_suffix = uuid.uuid4().hex[:8]
+    baseline_label = f"smoke-test-baseline-{label_suffix}"
+    candidate_label = f"smoke-test-candidate-{label_suffix}"
+
+    baseline_run_id, _ = await record_with_llm(
+        baseline_fake,
+        evaluator="extraction",
+        label=baseline_label,
+        run_config={"model": "fake-baseline"},
+    )
+    candidate_run_id, _ = await record_with_llm(
+        candidate_fake,
+        evaluator="extraction",
+        label=candidate_label,
+        run_config={"model": "fake-candidate"},
+    )
+
+    problems: list[str] = []
+    comparison_id: uuid.UUID | None = None
+    try:
+        result, comparison_id = await compare_runs(
+            evaluator="extraction",
+            baseline_ref=baseline_label,
+            candidate_ref=candidate_label,
+            regression_drop=0.05,
+            improvement_rise=0.02,
+        )
+
+        multi_page_rows = [r for r in result.rows if r.scope == "multi_page"]
+        if not multi_page_rows or any(r.status != RowStatus.REGRESSED for r in multi_page_rows):
+            problems.append(
+                f"expected the 'multi_page' slice to be REGRESSED, got {multi_page_rows}"
+            )
+        if result.overall_status != OverallStatus.REGRESSED:
+            problems.append(
+                f"expected overall comparison status REGRESSED, got {result.overall_status}"
+            )
+    finally:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            if comparison_id is not None:
+                await EvaluationComparisonRepository(session).delete(comparison_id)
+            run_repo = EvaluationRunRepository(session)
+            await run_repo.delete(baseline_run_id)
+            await run_repo.delete(candidate_run_id)
+            await session.commit()
+
+    return problems
+
+
 async def main() -> None:
-    problems = [*await _check_extraction_harness(), *await _check_triage_harness()]
+    problems = [
+        *await _check_extraction_harness(),
+        *await _check_triage_harness(),
+        *await _check_comparison_harness(),
+    ]
 
     if problems:
         print("=== Eval harness smoke test: FAILED ===")
@@ -108,6 +223,10 @@ async def main() -> None:
     print(
         f"triage harness: {len(TRIAGE_SCENARIOS)} scenarios reached and passed the faithfulness "
         "judge against a fake model"
+    )
+    print(
+        "comparison harness: a deliberately-regressed fake candidate run was correctly flagged "
+        "REGRESSED on its 'multi_page' slice, despite no other slice changing"
     )
 
 

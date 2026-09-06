@@ -8,6 +8,12 @@ from app.models.base import Base
 from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.document_page import DocumentPage
+from app.models.evaluation import (
+    ComparisonStatus,
+    EvaluationCaseResult,
+    EvaluationComparison,
+    EvaluationRun,
+)
 from app.models.extraction import ExtractedField, ExtractionRun, ExtractionStatus
 from app.models.membership import MembershipRole, OrganisationMembership
 from app.models.organisation import Organisation
@@ -23,10 +29,14 @@ __all__ = [
     "AgentRunStatus",
     "AgentToolCall",
     "Base",
+    "ComparisonStatus",
     "Document",
     "DocumentChunk",
     "DocumentPage",
     "DocumentStatus",
+    "EvaluationCaseResult",
+    "EvaluationComparison",
+    "EvaluationRun",
     "ExtractedField",
     "ExtractionRun",
     "ExtractionStatus",

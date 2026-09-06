@@ -156,3 +156,15 @@ ends with a stop point for explicit user go-ahead.
   apps/api/.venv/bin/activate && DATABASE_URL=... SESSION_SECRET=...
   python3 -m evals.smoke_test` (from repo root; runs in CI on every push —
   see `evals/README.md`)
+- Eval regression-comparison tests (pure, no DB/Ollama needed): `source
+  apps/api/.venv/bin/activate && pytest evals/` (from repo root; runs in
+  CI on every push — see `evals/README.md`)
+- Record an eval run for later comparison: `source apps/api/.venv/bin/activate
+  && DATABASE_URL=... SESSION_SECRET=... python3 -m evals.record_run
+  --evaluator {extraction,triage} --label X [--model NAME]` (from repo
+  root; `--model` bypasses routing for a real, manual two-model
+  comparison — see `evals/README.md`)
+- Compare two recorded eval runs: `source apps/api/.venv/bin/activate &&
+  DATABASE_URL=... SESSION_SECRET=... python3 -m evals.compare_runs
+  --evaluator {extraction,triage} --baseline X --candidate Y` (from repo
+  root; exits non-zero on a regressed verdict — see `evals/README.md`)

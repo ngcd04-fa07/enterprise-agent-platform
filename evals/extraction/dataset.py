@@ -20,6 +20,12 @@ class ExtractionCase:
     # field the model extracts anyway is a hallucination, not a partial
     # credit.
     expected: dict[str, str | None]
+    # Real, non-exclusive slice labels (Stage 18) — a case can carry more
+    # than one. Chosen from properties this dataset actually varies today
+    # (page count, whether any target field is present at all), not
+    # fabricated categories (e.g. "scanned document") this pipeline has no
+    # way to actually produce or distinguish.
+    tags: list[str]
 
 
 EXTRACTION_CASES: list[ExtractionCase] = [
@@ -39,6 +45,7 @@ EXTRACTION_CASES: list[ExtractionCase] = [
             "requested_coverage_limit": "$1,000,000",
             "broker_or_agent_name": "Harbor Point Insurance Services",
         },
+        tags=["single_page", "has_data"],
     ),
     ExtractionCase(
         key="partial_two_fields",
@@ -54,6 +61,7 @@ EXTRACTION_CASES: list[ExtractionCase] = [
             "requested_coverage_limit": "$500,000",
             "broker_or_agent_name": None,
         },
+        tags=["single_page", "has_data"],
     ),
     ExtractionCase(
         key="irrelevant_distractor",
@@ -68,6 +76,7 @@ EXTRACTION_CASES: list[ExtractionCase] = [
             "requested_coverage_limit": None,
             "broker_or_agent_name": None,
         },
+        tags=["single_page", "no_data"],
     ),
     ExtractionCase(
         key="fields_split_across_pages",
@@ -83,6 +92,7 @@ EXTRACTION_CASES: list[ExtractionCase] = [
             "requested_coverage_limit": None,
             "broker_or_agent_name": "Summit Risk Advisors",
         },
+        tags=["multi_page", "has_data"],
     ),
 ]
 

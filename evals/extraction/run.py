@@ -41,6 +41,7 @@ from app.schemas.extraction import EXTRACTION_FIELD_NAMES  # noqa: E402
 from app.services.extraction_service import ExtractionService  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
 
+from evals.comparison import CaseMetrics  # noqa: E402
 from evals.extraction.dataset import EXTRACTION_CASES  # noqa: E402
 
 
@@ -64,6 +65,12 @@ class ExtractionEvalResult:
         }
     )
     per_case_detail: list[str] = field(default_factory=list)
+    # Per-case metrics (Stage 18) — "correct" is the fraction of this
+    # case's fields that were scored correct (a matched value or a
+    # correctly-absent null); a hallucination or a wrong/missed value all
+    # count against it. Additive alongside the aggregate counts above,
+    # which stay the CLI's primary printed output.
+    case_metrics: list[CaseMetrics] = field(default_factory=list)
 
     @property
     def precision(self) -> float:
@@ -134,12 +141,14 @@ async def run_extraction_eval(
             actual = {field.field_name: field.value for field, _doc_id, _page in field_rows}
 
             case_lines = [f"{case.key}:"]
+            case_correct_fields = 0
             for field_name in EXTRACTION_FIELD_NAMES:
                 expected_value = case.expected[field_name]
                 actual_value = actual.get(field_name)
                 if expected_value is None:
                     if actual_value is None:
                         result.counts["correct_null"] += 1
+                        case_correct_fields += 1
                         outcome = "correct (null)"
                     else:
                         result.counts["hallucination"] += 1
@@ -149,12 +158,20 @@ async def run_extraction_eval(
                     outcome = f"MISSED (expected {expected_value!r})"
                 elif _matches(expected_value, actual_value):
                     result.counts["correct_value"] += 1
+                    case_correct_fields += 1
                     outcome = "correct"
                 else:
                     result.counts["wrong_value"] += 1
                     outcome = f"WRONG (got {actual_value!r}, expected {expected_value!r})"
                 case_lines.append(f"  {field_name}: {outcome}")
             result.per_case_detail.append("\n".join(case_lines))
+            result.case_metrics.append(
+                CaseMetrics(
+                    case_key=case.key,
+                    tags=case.tags,
+                    metrics={"correct": case_correct_fields / len(EXTRACTION_FIELD_NAMES)},
+                )
+            )
 
         await session.rollback()
 

@@ -12,6 +12,10 @@ class TriageScenario:
     key: str
     has_chunks: bool
     extracted_fields: dict[str, str]
+    # Real, non-exclusive slice labels (Stage 18) — derived from the
+    # deterministic recommendation each scenario actually produces (see
+    # app/agents/underwriting_rules.py), not fabricated categories.
+    tags: list[str]
 
 
 TRIAGE_SCENARIOS: list[TriageScenario] = [
@@ -25,6 +29,7 @@ TRIAGE_SCENARIOS: list[TriageScenario] = [
             "requested_coverage_limit": "$1,000,000",
             "broker_or_agent_name": "Harbor Point Insurance Services",
         },
+        tags=["approve"],
     ),
     TriageScenario(
         key="missing_named_insured_refer",
@@ -35,6 +40,7 @@ TRIAGE_SCENARIOS: list[TriageScenario] = [
             "requested_coverage_limit": "$500,000",
             "broker_or_agent_name": "Summit Risk Advisors",
         },
+        tags=["refer", "high_severity_missing"],
     ),
     TriageScenario(
         key="missing_low_severity_only",
@@ -45,10 +51,12 @@ TRIAGE_SCENARIOS: list[TriageScenario] = [
             "requested_effective_date": "June 15, 2026",
             "requested_coverage_limit": "$750,000",
         },
+        tags=["approve", "low_severity_missing"],
     ),
     TriageScenario(
         key="no_documentation",
         has_chunks=False,
         extracted_fields={},
+        tags=["refer", "no_documentation"],
     ),
 ]

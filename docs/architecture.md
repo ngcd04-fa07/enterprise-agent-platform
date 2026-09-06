@@ -1386,6 +1386,124 @@ both the triage synthesis call and the judge's own call to
 tier, not the original 3B model. Corrected to say so, and to note the
 Stage 16 routing change is why.
 
+## Decision: Stage 18 regression testing / release comparison — a normalized, persisted, direction-aware comparison engine on top of Stage 17's two evaluators
+
+**Context.** The user's brief for this stage was explicit and distinct
+from the vague "18–21: Deployment/polish" bucket this roadmap table
+originally carried: build systematic baseline-vs-candidate comparison on
+top of Stage 17's eval platform — aggregate *and* slice-level metrics,
+regression thresholds, persisted results, a report, and (critically) a
+worked example where an aggregate improvement must not mask a slice-level
+regression (89%→92% overall, but a slice at 87%→71% must still be flagged
+REGRESSED). Two explicit implementation constraints came with it: never
+force a real multi-model Ollama comparison into CI (CI must stay
+deterministic, fake-model only), and make metric *direction*
+(higher-is-better vs lower-is-better) explicit rather than assumed —
+this platform only has higher-is-better metrics today (extraction's
+`correct`, triage's `faithful`), but future metrics (latency, cost,
+hallucination rate, error rate) are lower-is-better, and guessing wrong
+would silently invert every regression/improvement call for them.
+
+**Decision.** A pure, dependency-free comparison engine
+(`evals/comparison.py`, no `app.*` import, no DB, no LLM) computes
+aggregate and per-slice metric averages and classifies each
+(scope, metric) pair independently against `RegressionThresholds`
+(default: regressed if a metric moves against its known-good direction by
+more than 5 points, improved if it moves with it by at least 2 points).
+Direction is looked up in an explicit, finite `KNOWN_METRIC_DIRECTIONS`
+registry — a metric not listed there is reported `UNKNOWN_DIRECTION`, not
+silently assumed higher-is-better; a metric or slice present on only one
+side is reported `MISSING_IN_BASELINE`/`MISSING_IN_CANDIDATE`, never
+treated as 0. `overall_status` is REGRESSED the instant *any* row
+anywhere — aggregate or any slice — is REGRESSED, independent of every
+other row; this is the one invariant the required example exists to
+prove (`evals/test_comparison.py::test_required_example_aggregate_
+improvement_does_not_mask_slice_regression`, encoding the brief's exact
+89/92/87/71 numbers).
+
+Persistence follows `ai_call_traces`'s precedent (Stage 14): three new,
+deliberately tenant-unscoped tables — `evaluation_runs`,
+`evaluation_case_results` (a real child table per the user's explicit
+choice, not a JSON blob, for future direct-SQL queryability — "show every
+regressed case across all runs" needs real rows), and
+`evaluation_comparisons`, which stores the exact thresholds used
+alongside the verdict so a past comparison's meaning survives a later
+threshold change. `run_extraction_eval`/`run_triage_eval` (Stage 17)
+additionally return `list[CaseMetrics]` per run — additive, the existing
+aggregate-counts CLI output is unchanged. Real, non-fabricated tags were
+added to both datasets (extraction: `single_page`/`multi_page`,
+`has_data`/`no_data`; triage: `approve`/`refer`,
+`high_severity_missing`/`low_severity_missing`/`no_documentation`, read
+directly off `app/agents/underwriting_rules.py`'s actual behavior) —
+never a fabricated category like "scanned document" this pipeline has no
+way to actually produce.
+
+Two new CLI scripts: `evals/record_run.py --evaluator {extraction,triage}
+--label X [--model NAME]` runs an evaluator for real and persists it —
+`--model` bypasses Stage 16's routing entirely to talk to one named
+Ollama model directly, the only way to get a genuine two-model comparison
+using real infrastructure with no fabricated data (a manual/optional
+demonstration only — see below). `evals/compare_runs.py --evaluator X
+--baseline ref --candidate ref` resolves each ref (a run id or a label,
+most-recent-wins with a printed disambiguation note if the label matches
+more than one run), refuses to compare across evaluators (checked
+unconditionally, not just relied on via label scoping — a raw run id
+could point at the wrong evaluator's run), persists the comparison, and
+prints a CLI table (the user's chosen "minimal UI/report" format,
+matching every existing convention in this repo). Exits non-zero on
+REGRESSED, so it doubles as a release gate, not just a report.
+
+**CI stays deterministic, per the explicit constraint.** `evals/
+smoke_test.py` (Stage 17) gained a third check,
+`_check_comparison_harness`, which calls `record_run.record_with_llm` and
+`compare_runs.compare_runs` directly (the same reusable functions the CLI
+wraps) with two `FakeLLMGateway`s — one answering every case perfectly,
+one identical except it fails to find anything on the second page of the
+real `fields_split_across_pages` case — and asserts the persisted
+comparison correctly flags the `multi_page` slice REGRESSED. `record_run
+.py`'s real-model path (`_build_llm`) is never invoked in CI; only
+`record_with_llm` (the gateway-agnostic core) is. The smoke check cleans
+up its own persisted rows in a `finally` block regardless of outcome —
+this is a smoke test, not real comparison history worth keeping. Two new
+`EvaluationRunRepository.delete`/`EvaluationComparisonRepository.delete`
+methods exist specifically to support this cleanup and were exercised
+live (see verification below) to confirm the FK behavior is exactly what
+was intended: deleting a run cascades its case results
+(`ON DELETE CASCADE`, matching `AgentToolCall`'s precedent), but deleting
+a run a comparison still references is blocked (no `ondelete` on
+`EvaluationComparison`'s FKs, matching `AgentRun.created_by_user_id`'s
+precedent — a comparison's meaning would be silently corrupted if either
+side it references could vanish out from under it).
+
+**A real, honestly-reported finding from the one manual model-comparison
+demo run.** Recorded a real `baseline` (extraction on `qwen2.5:3b`) and a
+real `candidate` (extraction on `qwen2.5:14b`, bypassing routing) against
+the same 4-case dataset, then compared them: the larger model scored
+*worse* — 90% → 85% aggregate, and the `multi_page` slice dropped 80% →
+60%. Reported as found, not smoothed over or discarded as an
+inconvenient result: a bigger local model is not automatically better at
+this specific, narrow task on this specific, tiny dataset, and this is
+exactly the kind of result Stage 18's tooling exists to catch and report
+plainly rather than assume away. (This is a single manual run on a
+4-case dataset, not a claim that `qwen2.5:14b` is generally worse at
+extraction — same honesty standard applied to every other small-sample
+result already reported in this document.)
+
+**Real, live verification beyond the automated test suites.** Every
+explicit correctness requirement from the brief was exercised directly
+against real Postgres, not just asserted in unit tests: a duplicate
+`case_key` insert into the same run was rejected by the DB
+(`uq_evaluation_case_results_evaluation_run_id`, `IntegrityError`);
+recording two runs under the same label and then comparing by that label
+produced the expected disambiguation note and used the most recent one;
+attempting to compare an `extraction` run against a `triage` run (by raw
+id) was rejected with a clear message; deleting a run still referenced by
+a persisted comparison was blocked, and deleting a run with no such
+reference correctly cascade-deleted its case results. Migrations were
+verified both from zero (0001→0009 in one pass) and incrementally from
+the Stage 17 head (0008→0009 alone) against a fresh Postgres, and the
+autogenerate diff-check came back empty both times.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1495,6 +1613,14 @@ same way as the original `qwen2.5:3b`, no API key, no new provider).
 runner code (now factored into reusable functions), invoked from a new CI
 step rather than a new tool or framework.
 
+**Stage 18 (`evals/comparison.py`, `evals/record_run.py`,
+`evals/compare_runs.py`, 3 new tables):** No new Python dependencies —
+the comparison engine is plain Python (`dataclasses`, `enum`,
+`statistics.mean`), and persistence reuses the same SQLAlchemy/Alembic
+stack every other table in this project already uses. No comparison/eval
+framework (e.g. `promptfoo`, `deepeval`) needed for a purpose-built
+engine this small.
+
 ---
 
 ## Roadmap
@@ -1525,4 +1651,7 @@ each stage as it happens, plus a status line per stage below.
 | 15 | Automated evaluation harness | Done — `evals/extraction/` (deterministic: normalized substring matching against a 4-case hand-labeled dataset, real `ExtractionService`, real Ollama) and `evals/triage_faithfulness/` (LLM-as-judge: versioned prompt, structured `FaithfulnessVerdict`, real `AgentService`) — see the decision below for why these are two different evaluator kinds, and why a new `evals/` rather than extending `benchmarks/`. Real results: extraction scored 100% precision / 80% recall (zero hallucinations, consistent with Stage 9); the faithfulness judge scored 4/4 "faithful" across two separate runs, but its reasoning quality varied run to run — self-inconsistent on one scenario in the first run, fully coherent on the identical scenario in a second run — reported honestly, not smoothed over. Both seed fixtures inside a rolled-back transaction, verified via psql to leave zero rows behind |
 | 16 | Model routing | Done — `RoutingLLMGateway` routes on a caller-supplied `TaskComplexity` hint (`SIMPLE`/`COMPLEX`), not an inferred signal: triage synthesis and the eval judge request `COMPLEX` and always go to the new local `qwen2.5:14b` "capable" tier; extraction stays `SIMPLE` (fast tier) by default for cost/latency, per chunk. Any fast-tier `LLMGenerationError` escalates once to the capable tier. `TracingLLMGateway` wraps each model individually (not the router) so `ai_call_traces.model` always reflects the model that actually served the call. 110/110 backend tests pass. Real, live-verified: extraction traced to `qwen2.5:3b`/`simple`, triage traced to `qwen2.5:14b`/`complex`; a forced fast-tier failure (misconfigured model name, real 404) correctly escalated to the capable tier end-to-end, logged and traced; both Stage 15 evaluators re-run under the new routing — extraction unchanged (100%/80%), the faithfulness judge (now capable-tier) scored 4/4 faithful with clean, self-consistent reasoning on every scenario, no repeat of Stage 15's documented run-to-run inconsistency; full Docker Compose stack rebuilt and confirmed healthy with no code changes needed |
 | 17 | Eval-integrated CI | Done — `evals/extraction/run.py` and `evals/triage_faithfulness/run.py` refactored to expose reusable `run_extraction_eval`/`run_triage_eval` functions taking the `LLMGateway` as a parameter; new `evals/smoke_test.py` drives both against a deterministic `FakeLLMGateway` (not real Ollama, unavailable in CI) and asserts a perfect score, now run as a CI step in the `backend` job on every push. Verified as a real tripwire, not a rubber stamp, by temporarily breaking the extraction scoring function and confirming the smoke test failed loudly (then reverting and confirming it passed again). A real bug caught before it shipped: the smoke test step must run right after migrations and *before* `pytest`, not after — `pytest`'s session-scoped `db_engine` fixture drops every table at teardown while `alembic_version` stays at head, which would have made the smoke test fail with the project's well-documented "relation does not exist" gotcha if ordered naively; reproduced the exact CI step ordering locally (migrate → smoke test → pytest) to confirm it end-to-end. Both real evaluators re-run against real Ollama post-refactor produced identical results to Stage 16 (100%/80%, 4/4 faithful), confirming the refactor was behavior-preserving. Also fixed a stale claim in `evals/README.md` — the faithfulness judge stopped being "the same 3B model being judged" the moment Stage 16 routed both the triage synthesis call and the judge's own call to the capable `qwen2.5:14b` tier |
-| 18–21 | Deployment/polish | Planned |
+| 18 | Regression testing / release comparison | Done — `evals/comparison.py` (pure, dependency-free): computes aggregate and per-slice metric averages and flags each independently REGRESSED/IMPROVED/UNCHANGED against explicit, direction-aware thresholds (`KNOWN_METRIC_DIRECTIONS` registry — an unregistered metric is `UNKNOWN_DIRECTION`, never guessed) — `overall_status` is REGRESSED the instant any row anywhere regresses, aggregate improvement never masks it (proven by the brief's exact required example, encoded verbatim as a test). Three new tenant-unscoped tables (`evaluation_runs`, `evaluation_case_results`, `evaluation_comparisons`, migration 0009, verified via empty autogenerate diff from both zero and the Stage 17 head). `evals/record_run.py`/`evals/compare_runs.py` are the CLI surface — the latter prints a CLI report and exits non-zero on regression. Real datasets got real slice tags (not fabricated categories). CI stays fully deterministic per explicit constraint: `evals/smoke_test.py` gained a third fake-model check proving the whole record → persist → compare → persist-the-comparison path; a real 3B-vs-14B comparison is a manual-only demonstration, never run in CI. 110/110 backend tests plus 13 new pure comparison tests (run via `pytest evals/`, not folded into apps/api's suite) all pass. Real, live-verified: duplicate case keys rejected by a DB constraint, duplicate labels safely disambiguated (most-recent-wins, printed note), cross-evaluator comparison rejected, FK delete behavior confirmed both ways (cascade for case results, restricted for a referenced run) — and a real, honestly-reported finding: the one manual real-model demo (`qwen2.5:3b` vs `qwen2.5:14b`) showed the larger model actually scoring *worse* on this 4-case dataset, reported plainly rather than discarded |
+| 19 | LLM routing, fallbacks, model policy, cost-aware selection | Planned |
+| 20 | Security hardening + production-readiness review | Planned |
+| 21 | Deployment, S3-compatible storage, multi-replica-safe migrations, polish, demo, final CI/CD | Planned |

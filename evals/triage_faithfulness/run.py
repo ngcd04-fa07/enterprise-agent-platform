@@ -44,6 +44,7 @@ from app.repositories.user_repository import UserRepository  # noqa: E402
 from app.services.agent_service import AgentService  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
 
+from evals.comparison import CaseMetrics  # noqa: E402
 from evals.triage_faithfulness.dataset import TRIAGE_SCENARIOS  # noqa: E402
 from evals.triage_faithfulness.judge import JUDGE_PROMPT_VERSION, judge_summary  # noqa: E402
 
@@ -52,6 +53,12 @@ from evals.triage_faithfulness.judge import JUDGE_PROMPT_VERSION, judge_summary 
 class TriageEvalResult:
     faithful_count: int = 0
     detail_lines: list[str] = field(default_factory=list)
+    # Per-case metrics (Stage 18), one entry per scenario that actually
+    # reached the judge — a SKIPPED scenario (synthesis itself failed)
+    # contributes no metric rather than a fabricated 0, since "the
+    # summary was unfaithful" and "there was no summary to judge" are not
+    # the same failure.
+    case_metrics: list[CaseMetrics] = field(default_factory=list)
 
 
 async def run_triage_eval(
@@ -145,6 +152,13 @@ async def run_triage_eval(
                 f"{scenario.key}: faithful={verdict.faithful} (recommendation="
                 f"{agent_run.recommendation.value if agent_run.recommendation else 'n/a'}, "
                 f"issues={issues})"
+            )
+            result.case_metrics.append(
+                CaseMetrics(
+                    case_key=scenario.key,
+                    tags=scenario.tags,
+                    metrics={"faithful": 1.0 if verdict.faithful else 0.0},
+                )
             )
 
         await session.rollback()
