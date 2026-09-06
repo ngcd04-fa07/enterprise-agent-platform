@@ -24,6 +24,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # Stage 21: migrations run exactly once, as their own short-lived
+  # service, not baked into the api container's boot command. With
+  # migrations in the api CMD (as before), scaling `api` to N replicas
+  # means N containers race to run `alembic upgrade head` concurrently
+  # against the same database — fine today (this compose file always
+  # runs exactly one api replica), but a real multi-replica-safe
+  # baseline shouldn't depend on that never changing. `api` now waits
+  # for this to *complete successfully* before starting, so it never
+  # races its own migration step either.
+  migrate:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_agent}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-enterprise_agent}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build:
       context: ./apps/api
@@ -40,6 +60,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   web:
     build:

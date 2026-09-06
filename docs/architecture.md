@@ -1809,6 +1809,96 @@ secret-manager integration. **Not added, because nothing here justified
 them:** Kubernetes, WAF, SIEM, enterprise SSO, service mesh, Redis for
 security.
 
+## Decision: Stage 21 deployment — S3-compatible storage, multi-replica-safe migrations, final polish
+
+**Context.** The last roadmap stage, closing out two things Stage 20
+explicitly deferred (S3/storage access-control model, multi-replica
+migration coordination) plus the S3-compatible storage implementation
+`app/storage/base.py` had been pointing at since Stage 4 ("deferred to
+Stage 21"). Scoped deliberately narrow, consistent with this project's
+whole-build approach: real, working infrastructure the abstractions
+already anticipated, not a speculative production topology this project
+was never asked to run.
+
+**Decision 1 — S3-compatible storage, boto3 + `asyncio.to_thread`, no
+new secret-handling path.** `S3ObjectStorage` (app/storage/s3.py)
+implements the existing `ObjectStorage` interface unchanged — selected
+via `Settings.storage_backend` (`"filesystem"`, unchanged default, or
+`"s3"`), with `Settings.s3_bucket_name`/`s3_endpoint_url`/`s3_region`.
+`s3_endpoint_url` is the whole story for "S3-compatible, not just AWS":
+unset, it's real AWS S3; set to `http://localhost:9000` or similar, it's
+MinIO or any other S3-compatible service, with zero code difference.
+Plain `boto3` wrapped in `asyncio.to_thread`, not `aioboto3` — matching
+`FilesystemObjectStorage`'s own existing pattern around sync file I/O,
+rather than adding a second, less-established async S3 client library
+for one call site. Credentials are never a `Settings` field: boto3's own
+standard credential chain (env vars, shared config file, an instance/
+task role) handles that — this project doesn't invent its own secret-
+handling path when a well-established one already exists. The target
+bucket is expected to already exist (this class never creates one),
+matching how a real production S3 setup wouldn't want application code
+silently creating buckets against a live AWS account.
+
+`generate_access_url` now returns a genuine, time-limited presigned URL
+for the S3 backend — meaningful for the first time, since a real (or
+real-shaped) object store exists to sign a URL against. This does *not*
+change how the API actually serves documents: `GET /documents/{id}/
+content` still proxies through the authenticated endpoint with its
+existing session/RBAC checks, for every backend. The storage abstraction
+being complete is a different thing from changing this app's access-
+control story, and this stage doesn't conflate the two.
+
+Tested two ways, deliberately: `moto`'s `mock_aws` (in-process fake AWS,
+no network, deterministic, `tests/test_s3_storage.py`) for the automated
+suite, and — separately — a real, actually-running MinIO container for
+live verification, not just the mock: a real `put_object`/`get_object`/
+`delete_object`/idempotent-second-delete round trip, and a presigned URL
+that a plain `curl` (no boto3, no SDK) could actually fetch content
+through — and, just as importantly, that the *same* URL with its
+signature stripped got a real `403` from MinIO, proving the presigned
+URL is genuinely access-controlled, not a bare public path that happens
+to look signed.
+
+**Decision 2 — migrations run once, as their own service, not baked into
+every container's boot.** The API Dockerfile's `CMD` no longer runs
+`alembic upgrade head` before starting uvicorn. `docker-compose.yml`
+gained a `migrate` service (same image, `command: ["alembic", "upgrade",
+"head"]`, no restart policy — it's meant to run once and exit), and
+`api` now depends on it with `condition: service_completed_successfully`
+rather than just `db`'s health check. This app has only ever run one
+`api` replica, so the old baked-in-migration approach was never actually
+racing anything in practice — but "multi-replica-safe" was this stage's
+own named scope, and the fix is small, standard (a dedicated one-shot
+migration job/service is the conventional pattern for exactly this), and
+removes the race structurally rather than documenting around it: with
+migrations out of `api`'s `CMD` entirely, scaling `api` to N replicas can
+no longer race on migrations regardless of N, because none of them ever
+attempt to run one. Live-verified: a full `docker compose up --build`
+from a clean volume showed `migrate` start only after `db` reported
+healthy, exit `0` after applying all 9 migrations, and `api` start only
+after `migrate` exited successfully — the dependency chain actually
+enforced, not just declared.
+
+**What stays deferred, honestly, even at the end of the roadmap.** This
+stage does not add: real TLS/reverse-proxy termination (this app still
+runs over plain HTTP in its own Docker Compose topology — a real
+deployment would put a reverse proxy in front and would need to revisit
+the `X-Forwarded-For` trust decision Stage 20 explicitly left alone
+without one); distributed/shared rate limiting or circuit-breaker state
+(both remain correctly in-memory and per-process, because this app is
+still one `api` replica, full stop — multi-replica coordination for
+these was named as a Stage 21 concern in earlier planning but isn't
+implemented here, since this stage's actual, concrete scope turned out
+to be the S3 storage and migration items above, not a general multi-
+replica runtime); S3 bucket IAM policy/lifecycle configuration (an
+infra-provisioning concern, not application code); a production secret
+manager integration (`SESSION_SECRET`/`POSTGRES_PASSWORD` still come
+from plain environment variables, matching every earlier stage's
+established, honestly-scoped local-dev/demo posture). None of these were
+skipped by oversight — each is named here explicitly so the boundary of
+what this build actually is stays clear at the point where the roadmap
+ends.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1926,6 +2016,16 @@ stack every other table in this project already uses. No comparison/eval
 framework (e.g. `promptfoo`, `deepeval`) needed for a purpose-built
 engine this small.
 
+**Stage 21 (`app/storage/s3.py`):** `boto3` (real runtime dependency —
+the standard, official AWS SDK, used for both real AWS S3 and any
+S3-compatible service via `endpoint_url`) and, dev-only, `moto[s3]`
+(in-process fake AWS for tests, no real network/account needed) and
+`boto3-stubs[s3]` (type stubs — boto3 itself has effectively no static
+types without this, and `mypy --strict` needs them). No `aioboto3`: see
+the Stage 21 decision above for why plain `boto3` + `asyncio.to_thread`
+was chosen instead, matching `FilesystemObjectStorage`'s own existing
+pattern rather than adding a second async S3 client library.
+
 **Stage 20 (`app/security/`):** One new dev-only tool, `pip-audit`
 (dependency vulnerability scanning, CI-gated) — no new runtime
 dependency. `npm audit` needed no new package (built into `npm`
@@ -1972,4 +2072,4 @@ each stage as it happens, plus a status line per stage below.
 | 18 | Regression testing / release comparison | Done — `evals/comparison.py` (pure, dependency-free): computes aggregate and per-slice metric averages and flags each independently REGRESSED/IMPROVED/UNCHANGED against explicit, direction-aware thresholds (`KNOWN_METRIC_DIRECTIONS` registry — an unregistered metric is `UNKNOWN_DIRECTION`, never guessed) — `overall_status` is REGRESSED the instant any row anywhere regresses, aggregate improvement never masks it (proven by the brief's exact required example, encoded verbatim as a test). Three new tenant-unscoped tables (`evaluation_runs`, `evaluation_case_results`, `evaluation_comparisons`, migration 0009, verified via empty autogenerate diff from both zero and the Stage 17 head). `evals/record_run.py`/`evals/compare_runs.py` are the CLI surface — the latter prints a CLI report and exits non-zero on regression. Real datasets got real slice tags (not fabricated categories). CI stays fully deterministic per explicit constraint: `evals/smoke_test.py` gained a third fake-model check proving the whole record → persist → compare → persist-the-comparison path; a real 3B-vs-14B comparison is a manual-only demonstration, never run in CI. 110/110 backend tests plus 13 new pure comparison tests (run via `pytest evals/`, not folded into apps/api's suite) all pass. Real, live-verified: duplicate case keys rejected by a DB constraint, duplicate labels safely disambiguated (most-recent-wins, printed note), cross-evaluator comparison rejected, FK delete behavior confirmed both ways (cascade for case results, restricted for a referenced run) — and a real, honestly-reported finding: the one manual real-model demo (`qwen2.5:3b` vs `qwen2.5:14b`) showed the larger model scoring *worse* on this specific 4-case dataset in this one run — a factual result from that run, not a general claim that either model is superior or inferior at extraction |
 | 19 | Production model policy and routing hardening | Done — builds on Stage 16's existing `RoutingLLMGateway`, hardened rather than replaced: per-tier `CircuitBreaker` (in-memory, symmetric — both fast and capable), opening only on `LLMFailureKind.TRANSIENT` failures (connection/timeout/5xx) and explicitly never on `CONTENT` (malformed model output) or `PERMANENT` (4xx/bad request) ones, so one bad response can't mark a healthy provider down. Retry is now kind-aware too — a `PERMANENT` failure breaks the retry loop immediately instead of blindly exhausting `max_attempts`; `OllamaGateway`'s retry count/timeout are now `Settings`-driven, not hardcoded. Every routed call carries a `route_reason` (`complexity_route_fast`/`complexity_route_capable`/`fast_breaker_open`/`fast_failed_escalate_capable`), recorded in the existing `ai_call_traces.call_metadata` — no new observability subsystem; the one case with no underlying call (`capable_breaker_open_fail_fast`) is logged, not fabricated as a trace row. `scripts/ai_traces_report.py` gained a per-`(provider, model)` latency/error-rate breakdown. Deliberately does not claim cost-based routing — Ollama has no per-token cost, so this stays latency/failure visibility plus configurable reliability policy, honestly scoped. 134/134 backend tests pass (24 new: circuit breaker state machine, failure classification via `httpx.MockTransport`, reason codes, breaker-open skip/fail-fast behavior). Real, live-verified against actual infrastructure: both tiers pointed at an unreachable port opened their breakers at exactly the configured threshold after 3 real connection-refused errors, and a 4th call failed with zero network calls attempted; the fast tier pointed at a real nonexistent Ollama model produced 5 consecutive real 404s, correctly classified `PERMANENT`, that never opened the breaker while still escalating to capable every time |
 | 20 | Security and production-readiness hardening | Done — full threat-model review of every Stage 9-19 surface found no CRITICAL issues and no actual privilege-escalation/cross-tenant leak; real findings were HIGH/MEDIUM correctness and hardening gaps, all fixed: `AgentRunRepository.approve()` is now permanently idempotent (409 on replay, live-verified the persisted approval is byte-identical after a rejected second call); a global ASGI-level request-body limit (`BodySizeLimitMiddleware`) enforces both declared Content-Length and actual bytes read, live-verified with raw sockets (413 without the body ever being sent; a chunked stream's connection closed well before the full oversized payload); a two-bucket, in-memory login/register rate limiter (`InMemoryRateLimiter`) that rate-limits without ever letting an attacker lock out a victim by guessing their email from elsewhere, live-verified via a real wrong-password flood returning 429 with `Retry-After`; `docker-compose.yml`'s `POSTGRES_PASSWORD` and `Settings.session_secret` no longer accept dangerous defaults/weak values (a real `uvicorn` process refuses to start with a short secret); both LLM system prompts now frame document content as untrusted (defense-in-depth, not the security boundary — proven structural via a deterministic test simulating a fully-compromised model); API-appropriate security headers on the backend, CSP/frame-ancestors on the Next.js frontend where HTML is actually served (a second Stage-7-style build-vs-runtime bug caught and fixed: `next.config.ts`'s `headers()` bakes at build time, so `ENVIRONMENT` needed the same Docker build-arg treatment as `API_ORIGIN`); PDF ingestion gained both a page-count and a chunk-count ceiling; `pip-audit`/`npm audit`/ruff's `S` ruleset are now in CI, each reviewed for actionability rather than blindly forcing a clean number. 155/155 backend tests pass (21 new). Explicitly deferred to Stage 21: distributed rate limiting, shared circuit-breaker state, S3/storage IAM, multi-replica migration coordination, real TLS. Not added: Kubernetes, WAF, SIEM, enterprise SSO, service mesh, Redis for security — nothing in this app's current single-instance deployment justified them |
-| 21 | Deployment, S3-compatible storage, multi-replica-safe operations and final polish | Planned |
+| 21 | Deployment, S3-compatible storage, multi-replica-safe operations and final polish | Done — `S3ObjectStorage` (app/storage/s3.py) implements the existing `ObjectStorage` interface via `boto3` + `asyncio.to_thread`, selected by `Settings.storage_backend`, working against real AWS S3 or any S3-compatible service (MinIO, etc.) via `s3_endpoint_url` with zero code difference; tested against `moto`'s in-process fake AWS (`tests/test_s3_storage.py`, 5/5 pass) and, separately, live against a genuinely-running MinIO container — a real put/get/delete/idempotent-delete round trip, plus a presigned URL fetched with plain `curl` (no SDK) and confirmed to return real `403` with its signature stripped, proving it's actually access-controlled. Migrations no longer run inside the API container's boot command — `docker-compose.yml` gained a one-shot `migrate` service (`alembic upgrade head`, no restart policy) that `api` now depends on via `service_completed_successfully`, removing the multi-replica migration race structurally (scaling `api` can never race on migrations again, because none of its replicas ever attempt one) rather than just documenting around it; live-verified via a full clean-volume `docker compose up --build`, confirming the exact dependency order (`db` healthy → `migrate` runs and exits 0 → `api` starts). 160/160 backend tests pass (5 new). Final polish: this document and the README both now describe the complete, 21-stage build. Explicitly still deferred, stated plainly rather than silently dropped: real TLS/reverse-proxy termination (and the `X-Forwarded-For` trust decision that comes with one), distributed rate limiting and shared circuit-breaker state (this app is still one `api` replica), S3 bucket IAM/lifecycle policy (infra provisioning, not application code), and a production secret-manager integration |

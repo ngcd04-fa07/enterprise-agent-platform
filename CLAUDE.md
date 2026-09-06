@@ -130,7 +130,10 @@ ends with a stop point for explicit user go-ahead.
 - Frontend lint: `cd apps/web && npm run lint`
 - Frontend type check: `cd apps/web && npm run typecheck`
 - Frontend build: `cd apps/web && npm run build`
-- Run migrations: `cd apps/api && alembic upgrade head`
+- Run migrations: `cd apps/api && alembic upgrade head` (inside `docker
+  compose up`, this runs automatically as the one-shot `migrate` service
+  — Stage 21 — before `api` starts; it's not baked into the `api`
+  container's own boot anymore)
 - New migration (review before trusting autogenerate): `cd apps/api &&
   alembic revision --autogenerate -m "message"`
 - Database reset (local only): `docker compose down -v db && docker compose

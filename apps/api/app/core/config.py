@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,20 @@ class Settings(BaseSettings):
     # first time a file is written, not silently.
     storage_root: str = "./data/documents"
     max_upload_size_bytes: int = 25 * 1024 * 1024
+
+    # Stage 21: which ObjectStorage implementation app/storage/factory.py
+    # builds. "filesystem" (default, unchanged behavior) needs nothing
+    # else below; "s3" needs s3_bucket_name, and works against either
+    # real AWS S3 (s3_endpoint_url unset) or any S3-compatible service
+    # like MinIO (s3_endpoint_url set) — see app/storage/s3.py.
+    # Credentials are never a Settings field: boto3's own standard
+    # credential chain (env vars, shared config file, an instance/task
+    # role) handles that, so there's no project-specific secret-handling
+    # path to get wrong here.
+    storage_backend: Literal["filesystem", "s3"] = "filesystem"
+    s3_bucket_name: str | None = None
+    s3_endpoint_url: str | None = None
+    s3_region: str = "us-east-1"
 
     # Stage 20: a global ceiling on any request body, enforced at the ASGI
     # layer (app/security/body_size_limit.py) before any route/Pydantic
@@ -132,6 +147,15 @@ class Settings(BaseSettings):
                 "max_request_body_bytes must be >= max_upload_size_bytes — otherwise the "
                 "global request-body limit would reject legitimate uploads before the "
                 "upload route's own, more precise size check ever runs."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_s3_backend_has_a_bucket(self) -> "Settings":
+        if self.storage_backend == "s3" and not self.s3_bucket_name:
+            raise ValueError(
+                "s3_bucket_name must be set when storage_backend=s3 — fail loudly at "
+                "startup rather than the first upload failing with an unclear error."
             )
         return self
 
