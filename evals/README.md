@@ -38,19 +38,43 @@ source apps/api/.venv/bin/activate
 DATABASE_URL=... SESSION_SECRET=... python3 -m evals.triage_faithfulness.run
 ```
 
-**A real limitation, not hidden:** the judge is the same 3B local model
-being judged, and its reasoning quality varies noticeably run to run, not
-just case to case. One real run flagged a real omission in its own
-`issues` reasoning while still marking the overall verdict
-`faithful: true`, and separately mischaracterized a `low`-severity
-finding as high-severity. A second run over the identical scenarios
-produced fully coherent, internally-consistent reasoning throughout, with
-no such errors. LLM-as-judge with a small local model is a real, useful
-signal for catching gross failures (invented facts, contradicted
-recommendations) — it is not a substitute for reading the `issues`
-output on any given run, and its boolean verdict alone shouldn't be
-trusted as a stable, precise pass/fail without a human spot-checking the
-reasoning behind it.
+**A real limitation, not hidden:** the judge is a local model from the
+same family as the one it's judging — both the triage synthesis call and
+the judge's own call request `TaskComplexity.COMPLEX` (Stage 16's model
+routing), so as of Stage 16 both run on the local `qwen2.5:14b` "capable"
+tier, not a genuinely independent or larger model. Its reasoning quality
+has varied noticeably between runs: the first run against the original
+3B model (pre-Stage-16) flagged a real omission in its own `issues`
+reasoning while still marking the overall verdict `faithful: true`, and
+separately mischaracterized a `low`-severity finding as high-severity; a
+second run over the identical scenarios produced fully coherent,
+internally-consistent reasoning throughout; the first run after Stage
+16's routing change (now on `qwen2.5:14b`) was also fully clean. LLM-as-
+judge with a small local model is a real, useful signal for catching
+gross failures (invented facts, contradicted recommendations) — it is
+not a substitute for reading the `issues` output on any given run, and
+its boolean verdict alone shouldn't be trusted as a stable, precise
+pass/fail without a human spot-checking the reasoning behind it.
+
+## `smoke_test.py` — CI-safe harness check, not a model-quality measurement
+
+Neither evaluator above runs in CI: both need a real Ollama model, which
+CI's runners don't have. `smoke_test.py` instead runs the exact same
+seeding/scoring/judging code (`run_extraction_eval`/`run_triage_eval`,
+factored out of each `run.py` for this reason) against a deterministic
+`FakeLLMGateway` programmed to behave perfectly — so it's cheap, fast, and
+runs on every push (see `.github/workflows/ci.yml`). It answers a
+different question than the two evaluators above: not "is the model any
+good," but "is the harness itself still wired correctly" — dataset
+loading, fixture seeding inside a rolled-back transaction, the
+merge/scoring/judging logic. A regression here (a renamed field, a broken
+merge, a changed call signature) fails CI immediately instead of only
+surfacing the next time someone runs the real evaluators by hand.
+
+```bash
+source apps/api/.venv/bin/activate
+DATABASE_URL=... SESSION_SECRET=... python3 -m evals.smoke_test
+```
 
 ## Why `evals/` and not `benchmarks/`
 
@@ -63,8 +87,11 @@ roadmap names them as distinct stages (11 vs. 15) for the same reason.
 
 ## Common design notes
 
-Both evaluators seed their fixtures inside one transaction that's always
-rolled back — a run never leaves data behind in whatever database
+All three scripts seed their fixtures inside one transaction that's
+always rolled back — a run never leaves data behind in whatever database
 `DATABASE_URL` points at (verified via direct `psql` inspection after a
-real run of each). Both run against the real Ollama model, no fakes —
-the point is measuring real behavior.
+real run of each). `extraction/run.py` and `triage_faithfulness/run.py`
+run against the real Ollama models, no fakes — the point is measuring
+real behavior. `smoke_test.py` is the deliberate exception, using a fake
+model so it can run without Ollama at all — see above for why that's a
+different, complementary kind of check, not a replacement.

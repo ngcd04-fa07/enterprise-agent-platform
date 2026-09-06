@@ -1,7 +1,7 @@
-"""Runs the real AgentService.run_triage (real Ollama, no fakes) against
-hand-built scenarios, then judges the resulting summary's faithfulness
-against exactly what it was given — see judge.py for why this is the one
-LLM-as-judge evaluator in this app rather than a deterministic one.
+"""Runs the real AgentService.run_triage against hand-built scenarios,
+then judges the resulting summary's faithfulness against exactly what it
+was given — see judge.py for why this is the one LLM-as-judge evaluator
+in this app rather than a deterministic one.
 
 Extracted fields are seeded directly rather than produced by a real
 extraction run, so this eval is isolated to "is the triage summary
@@ -10,6 +10,12 @@ deterministic eval — see evals/extraction/).
 
 Seeds fixtures inside one transaction that's rolled back at the end.
 
+`run_triage_eval` takes the LLM gateway as a parameter rather than calling
+`get_llm_gateway()` itself, so `evals/smoke_test.py` can drive the exact
+same seeding/judging logic with a deterministic fake in CI (no Ollama
+available there) — `main()` below is the only place that wires in the
+real gateway for an actual model-quality run.
+
 Usage (from the repo root, with apps/api's venv active):
     source apps/api/.venv/bin/activate
     DATABASE_URL=... SESSION_SECRET=... python3 -m evals.triage_faithfulness.run
@@ -17,11 +23,13 @@ Usage (from the repo root, with apps/api's venv active):
 
 import asyncio
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
 
 from app.db.session import get_sessionmaker  # noqa: E402
+from app.llm_gateway.base import LLMGateway  # noqa: E402
 from app.llm_gateway.factory import get_llm_gateway  # noqa: E402
 from app.models.extraction import ExtractionStatus  # noqa: E402
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository  # noqa: E402
@@ -34,17 +42,22 @@ from app.repositories.organisation_repository import OrganisationRepository  # n
 from app.repositories.submission_repository import SubmissionRepository  # noqa: E402
 from app.repositories.user_repository import UserRepository  # noqa: E402
 from app.services.agent_service import AgentService  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
 
 from evals.triage_faithfulness.dataset import TRIAGE_SCENARIOS  # noqa: E402
 from evals.triage_faithfulness.judge import JUDGE_PROMPT_VERSION, judge_summary  # noqa: E402
 
 
-async def main() -> None:
-    sessionmaker = get_sessionmaker()
-    llm = get_llm_gateway()
+@dataclass
+class TriageEvalResult:
+    faithful_count: int = 0
+    detail_lines: list[str] = field(default_factory=list)
 
-    faithful_count = 0
-    detail_lines: list[str] = []
+
+async def run_triage_eval(
+    llm: LLMGateway, *, sessionmaker: async_sessionmaker[AsyncSession]
+) -> TriageEvalResult:
+    result = TriageEvalResult()
 
     async with sessionmaker() as session:
         org = await OrganisationRepository(session).create(name="Triage Faithfulness Eval Org")
@@ -114,7 +127,7 @@ async def main() -> None:
                 (call for call in tool_calls if call.tool_name == "synthesize_summary"), None
             )
             if synthesize_call is None:
-                detail_lines.append(
+                result.detail_lines.append(
                     f"{scenario.key}: SKIPPED (run failed, status={agent_run.status.value}, "
                     f"error={agent_run.error_message})"
                 )
@@ -126,9 +139,9 @@ async def main() -> None:
                 output_summary=synthesize_call.output_summary,
             )
             if verdict.faithful:
-                faithful_count += 1
+                result.faithful_count += 1
             issues = "; ".join(verdict.issues) if verdict.issues else "none"
-            detail_lines.append(
+            result.detail_lines.append(
                 f"{scenario.key}: faithful={verdict.faithful} (recommendation="
                 f"{agent_run.recommendation.value if agent_run.recommendation else 'n/a'}, "
                 f"issues={issues})"
@@ -136,9 +149,15 @@ async def main() -> None:
 
         await session.rollback()
 
+    return result
+
+
+async def main() -> None:
+    result = await run_triage_eval(get_llm_gateway(), sessionmaker=get_sessionmaker())
+
     print(f"=== Triage summary faithfulness (judge prompt {JUDGE_PROMPT_VERSION}) ===\n")
-    print("\n".join(detail_lines))
-    print(f"\nFaithful: {faithful_count}/{len(TRIAGE_SCENARIOS)}")
+    print("\n".join(result.detail_lines))
+    print(f"\nFaithful: {result.faithful_count}/{len(TRIAGE_SCENARIOS)}")
 
 
 if __name__ == "__main__":

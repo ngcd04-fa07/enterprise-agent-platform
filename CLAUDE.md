@@ -152,4 +152,7 @@ ends with a stop point for explicit user go-ahead.
 - Triage faithfulness eval (LLM-as-judge): `source apps/api/.venv/bin/activate
   && DATABASE_URL=... SESSION_SECRET=... python3 -m evals.triage_faithfulness.run`
   (from repo root; see `evals/README.md`)
-- Eval smoke test: _TBD (Stage 17)_
+- Eval smoke test (CI-safe, fake model, no Ollama needed): `source
+  apps/api/.venv/bin/activate && DATABASE_URL=... SESSION_SECRET=...
+  python3 -m evals.smoke_test` (from repo root; runs in CI on every push —
+  see `evals/README.md`)

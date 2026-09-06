@@ -1326,6 +1326,66 @@ One run is not proof the capable tier eliminates that inconsistency
 entirely, but it is a concrete, favorable data point for the routing
 decision this stage made.
 
+## Decision: Stage 17 eval-integrated CI — a fake-model smoke test, not the real evaluators, run in CI
+
+**Context.** CLAUDE.md's Commands section carried a placeholder since
+Stage 15: "Eval smoke test: _TBD (Stage 17)_." Neither `evals/extraction/`
+nor `evals/triage_faithfulness/` (Stage 15) runs in CI today — both need a
+real Ollama model, which CI's runners don't have and won't be given one
+(consistent with keeping CI fast, hermetic, and free of a multi-GB model
+download on every push). The real question for this stage was what a CI
+"eval smoke test" could actually check without that model.
+
+**Decision.** Split each evaluator's `run.py` into a reusable async
+function (`run_extraction_eval`, `run_triage_eval`) that takes the
+`LLMGateway` as a parameter, and a thin `main()` that wires in the real
+gateway via `get_llm_gateway()` for a genuine local run. Add
+`evals/smoke_test.py`, which calls those same functions with a
+deterministic `FakeLLMGateway` programmed to behave perfectly (the
+extraction fake returns exactly each case's expected fields; the triage
+fake always returns a valid summary and a `faithful: true` verdict), then
+asserts the harness reports a perfect score. This is deliberately *not* a
+model-quality check — it can't be, with a fake standing in for the model
+— it is a check that the harness code around the model (dataset loading,
+fixture seeding inside a rolled-back transaction, the merge/scoring/
+judging wiring) still does what it's supposed to. Verified this is a real
+tripwire, not a rubber stamp: temporarily broke the extraction scoring
+function (`_matches` forced to always return `False`) and confirmed
+`smoke_test.py` failed loudly (`wrong_value: 10`, exit code 1) instead of
+silently passing, then reverted and confirmed it passed again — the same
+discipline used to prove Stage 16's routing failure-escalation path
+actually works, applied here to a test itself.
+
+**A real bug this stage caught before it shipped, not after.** The
+natural place for a new CI step touching the database is right after
+`pytest`, alongside the other verification steps. But `apps/api/tests/
+conftest.py`'s session-scoped `db_engine` fixture calls `Base.metadata.
+drop_all` at teardown, dropping every table while `alembic_version` stays
+stamped at head — the same environment gotcha this project has hit and
+documented repeatedly during manual live verification all session. Adding
+the smoke test step *after* `pytest` in the workflow would have hit that
+exact failure the first time CI ran it (an `UndefinedTableError` with no
+code actually broken). Caught by reasoning through the fixture's teardown
+behavior before running it, not by watching CI fail — the smoke test step
+runs right after `alembic upgrade head` and *before* `pytest`, on the
+freshly-migrated, not-yet-torn-down schema. Reproduced the exact CI
+ordering locally to confirm it end-to-end: full volume reset → migrate →
+smoke test (passed) → `pytest` (110/110 passed, its own `create_all` a
+harmless no-op against the already-migrated tables).
+
+**Real verification.** `evals/extraction/run.py` and `evals/
+triage_faithfulness/run.py` re-run against the real Ollama models after
+the refactor produced byte-identical results to before it (100%
+precision / 80% recall; 4/4 faithful) — confirming the extraction of
+`run_extraction_eval`/`run_triage_eval` didn't change real-model behavior,
+only made it injectable. `evals/README.md` also had a stale claim fixed
+along the way: it said the faithfulness judge is "the same 3B local model
+being judged," which stopped being accurate the moment Stage 16 routed
+both the triage synthesis call and the judge's own call to
+`TaskComplexity.COMPLEX` — both now run on the `qwen2.5:14b` capable
+tier, not the original 3B model. Corrected to say so, and to note the
+Stage 16 routing change is why.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1430,6 +1490,11 @@ plain Python behind the existing `LLMGateway` interface. The only new
 infrastructure is a second local Ollama model (`qwen2.5:14b`, pulled the
 same way as the original `qwen2.5:3b`, no API key, no new provider).
 
+**Stage 17 (`evals/smoke_test.py`, CI):** No new dependencies — reuses
+`apps/api`'s already-installed `FakeLLMGateway` and the existing eval
+runner code (now factored into reusable functions), invoked from a new CI
+step rather than a new tool or framework.
+
 ---
 
 ## Roadmap
@@ -1459,4 +1524,5 @@ each stage as it happens, plus a status line per stage below.
 | 14 | AI tracing / observability | Done — `app/observability/`: `TracingLLMGateway`/`TracingEmbeddingProvider` wrap the real providers behind their existing interfaces (applied in the two factory functions, zero changes to any caller), plus an explicit trace around `RetrievalService.search` for the one call type that doesn't route through either provider abstraction; new `ai_call_traces` table (migration 0008, verified via empty autogenerate diff), deliberately un-scoped to any tenant (operational/SRE data, not business data) and not yet exposed through the tenant-facing API (would need a cross-org "platform operator" role that doesn't exist) — visible via direct `psql` and `apps/api/scripts/ai_traces_report.py`. 105/105 backend tests pass. Real verification: a full journey against real models produced exactly the right trace for every call (embed_documents, embed_query, retrieval_search, 2× llm_generate) with 0% error rate; a real triage failure through Docker Compose (Ollama unreachable) was correctly traced as a failure with the full error message, confirmed via both psql and the report script |
 | 15 | Automated evaluation harness | Done — `evals/extraction/` (deterministic: normalized substring matching against a 4-case hand-labeled dataset, real `ExtractionService`, real Ollama) and `evals/triage_faithfulness/` (LLM-as-judge: versioned prompt, structured `FaithfulnessVerdict`, real `AgentService`) — see the decision below for why these are two different evaluator kinds, and why a new `evals/` rather than extending `benchmarks/`. Real results: extraction scored 100% precision / 80% recall (zero hallucinations, consistent with Stage 9); the faithfulness judge scored 4/4 "faithful" across two separate runs, but its reasoning quality varied run to run — self-inconsistent on one scenario in the first run, fully coherent on the identical scenario in a second run — reported honestly, not smoothed over. Both seed fixtures inside a rolled-back transaction, verified via psql to leave zero rows behind |
 | 16 | Model routing | Done — `RoutingLLMGateway` routes on a caller-supplied `TaskComplexity` hint (`SIMPLE`/`COMPLEX`), not an inferred signal: triage synthesis and the eval judge request `COMPLEX` and always go to the new local `qwen2.5:14b` "capable" tier; extraction stays `SIMPLE` (fast tier) by default for cost/latency, per chunk. Any fast-tier `LLMGenerationError` escalates once to the capable tier. `TracingLLMGateway` wraps each model individually (not the router) so `ai_call_traces.model` always reflects the model that actually served the call. 110/110 backend tests pass. Real, live-verified: extraction traced to `qwen2.5:3b`/`simple`, triage traced to `qwen2.5:14b`/`complex`; a forced fast-tier failure (misconfigured model name, real 404) correctly escalated to the capable tier end-to-end, logged and traced; both Stage 15 evaluators re-run under the new routing — extraction unchanged (100%/80%), the faithfulness judge (now capable-tier) scored 4/4 faithful with clean, self-consistent reasoning on every scenario, no repeat of Stage 15's documented run-to-run inconsistency; full Docker Compose stack rebuilt and confirmed healthy with no code changes needed |
-| 17–21 | Eval-integrated CI → deployment/polish | Planned |
+| 17 | Eval-integrated CI | Done — `evals/extraction/run.py` and `evals/triage_faithfulness/run.py` refactored to expose reusable `run_extraction_eval`/`run_triage_eval` functions taking the `LLMGateway` as a parameter; new `evals/smoke_test.py` drives both against a deterministic `FakeLLMGateway` (not real Ollama, unavailable in CI) and asserts a perfect score, now run as a CI step in the `backend` job on every push. Verified as a real tripwire, not a rubber stamp, by temporarily breaking the extraction scoring function and confirming the smoke test failed loudly (then reverting and confirming it passed again). A real bug caught before it shipped: the smoke test step must run right after migrations and *before* `pytest`, not after — `pytest`'s session-scoped `db_engine` fixture drops every table at teardown while `alembic_version` stays at head, which would have made the smoke test fail with the project's well-documented "relation does not exist" gotcha if ordered naively; reproduced the exact CI step ordering locally (migrate → smoke test → pytest) to confirm it end-to-end. Both real evaluators re-run against real Ollama post-refactor produced identical results to Stage 16 (100%/80%, 4/4 faithful), confirming the refactor was behavior-preserving. Also fixed a stale claim in `evals/README.md` — the faithfulness judge stopped being "the same 3B model being judged" the moment Stage 16 routed both the triage synthesis call and the judge's own call to the capable `qwen2.5:14b` tier |
+| 18–21 | Deployment/polish | Planned |

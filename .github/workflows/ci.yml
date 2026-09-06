@@ -43,6 +43,23 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
           SESSION_SECRET: ci-test-secret
+      - name: Eval harness smoke test
+        # Must run before "Test (pytest)", not after: pytest's session-
+        # scoped db_engine fixture drops every table at teardown (see
+        # tests/conftest.py), so running this afterward would hit the
+        # documented "relation does not exist" gotcha even though
+        # alembic_version still (wrongly) claims the schema is at head.
+        # Runs from the repo root (not apps/api) so `evals` resolves as a
+        # package; reuses the dependencies just installed above via
+        # evals/*'s own sys.path insert — no separate install step needed.
+        # Exercises the real eval harness wiring (dataset loading, fixture
+        # seeding, scoring/judging) against a deterministic fake model, not
+        # real Ollama (unavailable in CI) — see evals/smoke_test.py.
+        working-directory: ${{ github.workspace }}
+        run: python3 -m evals.smoke_test
+        env:
+          DATABASE_URL: postgresql+asyncpg://enterprise_agent:enterprise_agent@localhost:5432/enterprise_agent
+          SESSION_SECRET: ci-test-secret
       - name: Test (pytest)
         run: pytest
         env:
