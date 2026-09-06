@@ -30,3 +30,4 @@ npm-debug.log*
 
 # Local filesystem object storage (default STORAGE_ROOT, see app/core/config.py)
 apps/api/data/
+.neon

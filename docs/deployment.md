@@ -70,6 +70,33 @@ looks today, that's flagged explicitly.
    terminate TLS yourself — verify by actually connecting (Step 6) rather
    than assuming this exact string is correct.
 
+**⚠️ Warning, confirmed live against a real setup:** if you use the official
+Neon CLI (`neon link`) instead of the dashboard to connect this project,
+`neon link` does not just link the directory — it **overwrites `DATABASE_URL`
+in your local `.env`** with the linked branch's real connection string
+(along with `DATABASE_URL_UNPOOLED` and `NEON_BRANCH`). It correctly adds
+`.neon` to `.gitignore` on its own, so nothing new gets committed, but it
+still silently repoints local development at whichever Neon branch you
+linked — production/demo included, if that's what you link.
+
+This matters because of this project's own documented gotcha (see
+`docs/architecture.md`): the pytest suite's session-scoped `db_engine`
+fixture **drops every table** at teardown. If local `.env`'s `DATABASE_URL`
+is pointed at the real Neon demo database when you run `pytest` (or
+`alembic`, or anything else that reads `.env` directly rather than through
+docker-compose's own `POSTGRES_*`-derived construction), it will tear down
+the live demo's schema, not a disposable local one.
+
+If you use `neon link` for any reason, restore local `.env`'s `DATABASE_URL`
+back to the local Docker Postgres value immediately afterward, and don't run
+tests until you've confirmed (via host/port/database name only, never by
+printing credentials) that it's pointing at `localhost`, not `*.neon.tech`.
+The safer path, and the one this guide otherwise assumes: never let the
+production/demo Neon connection string touch local `.env` at all — copy it
+directly from Neon's dashboard (or `neon connection-string`, run in your own
+terminal) straight into Render's environment-variable UI in Step 4, and
+leave local `.env` permanently pointed at local Postgres.
+
 ## Step 2 — Cloudflare R2: object storage
 
 1. In the Cloudflare dashboard, create an R2 bucket (e.g.
