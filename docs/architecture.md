@@ -1504,6 +1504,121 @@ verified both from zero (0001→0009 in one pass) and incrementally from
 the Stage 17 head (0008→0009 alone) against a fresh Postgres, and the
 autogenerate diff-check came back empty both times.
 
+## Decision: Stage 19 production model policy — failure-kind-aware circuit breakers, configurable retry/timeout, reason-coded routing
+
+**Context.** Stage 16 built `RoutingLLMGateway`: two hardcoded tiers,
+complexity-based routing, escalate-on-any-failure. That's a real
+mechanism, not a stub — but "production model policy" asks for hardening
+it, not inventing routing from scratch: a circuit breaker so an outage
+doesn't make every call pay a full timeout against a dead tier,
+configurable retry/timeout instead of hardcoded constants, and enough
+observability to actually debug a routing decision after the fact. The
+user's brief for this stage came with four explicit constraints, each
+addressing a specific way naive hardening goes wrong.
+
+**Decision 1 — failure kind, not just failure.** The single existing
+`LLMGenerationError` grew a `kind: LLMFailureKind` attribute
+(`TRANSIENT`/`PERMANENT`/`CONTENT`) and an `attempts: int` attribute,
+rather than becoming several exception types — every existing catch site
+(`ExtractionService`, `AgentService`, evals) still just catches
+`LLMGenerationError` and works unchanged; only `RoutingLLMGateway`, which
+now actually cares about *why* a call failed, inspects `.kind`.
+`OllamaGateway` classifies at the source: `httpx.TransportError`
+(connection refused, timeout — no status code at all) and a 5xx
+`HTTPStatusError` are `TRANSIENT`; a 4xx is `PERMANENT` (empirically
+confirmed against real Ollama: an unknown model name returns a real
+`404`, not a 5xx); a JSON-parse or Pydantic-validation failure on the
+model's own output is `CONTENT`. Only `TRANSIENT` is ever recorded
+against a tier's `CircuitBreaker` — a `CONTENT` or `PERMANENT` failure
+says nothing about the tier's health and must never trip it, per the
+brief's explicit constraint. This is the one distinction the whole
+stage is built around; get it wrong and one bad response marks a
+healthy provider as down.
+
+**Decision 2 — bounded, kind-aware retry.** `OllamaGateway`'s retry loop
+now breaks immediately on a `PERMANENT` classification instead of
+exhausting every configured attempt on a request that cannot succeed
+differently the second time — verified live against real Ollama: five
+consecutive real `404`s against an unmisconfigured model name each show
+`attempts: 1` in their trace, not 2, despite `max_attempts=2`.
+`TRANSIENT` and `CONTENT` failures still retry up to `max_attempts`
+(now `Settings.ollama_max_attempts`, default unchanged at 2) — content
+failures because generation is stochastic and a resample might succeed;
+transient ones because the same request plausibly will. Every retry
+attempt logs a warning (model, attempt number, kind, error) so a call
+that succeeded only on a second attempt is still visible somewhere, not
+silently indistinguishable from a clean first-try success — and every
+eventual failure's trace carries `attempts` regardless.
+
+**Decision 3 — per-tier circuit breakers, symmetric, in-memory.**
+`CircuitBreaker` (closed → open after `failure_threshold` consecutive
+`TRANSIENT` failures → half-open probe after `cooldown_seconds` → closed
+on success / reopens on failure) — one per tier, not just on `fast`: a
+`COMPLEX`-only call has no fallback if `capable` is down, so failing it
+fast when capable's own breaker is open matters just as much as skipping
+a dead fast tier. In-memory, per-process, deliberately not shared or
+persisted — this app is still single-instance until Stage 21's
+multi-replica work, so process-local state is exactly the right amount
+of machinery for the deployment that actually exists, not a hypothetical
+one. One accepted simplification, stated rather than hidden: no locking
+around the half-open probe, so concurrent requests during a recovery
+window could all attempt a probe at once — building strict single-probe
+concurrency control is more machinery than this project's scale
+warrants. Live-verified against real infrastructure, not just unit
+tests: pointing both tiers at an unreachable port produced three real
+`httpx.ConnectError`s, opened both breakers exactly at the configured
+threshold of 3, and a 4th call correctly failed immediately with no
+network call attempted at all (confirmed via `ai_call_traces` — exactly
+6 rows for 3 real round-trips, zero for the 4th).
+
+**Decision 4 — reason codes, reusing the existing tracing architecture.**
+`generate_structured` gained one more optional parameter,
+`route_reason: str | None`, following the same precedent as Stage 16's
+`complexity` — `RoutingLLMGateway` sets it on every call it makes into a
+tier (`complexity_route_fast`, `complexity_route_capable`,
+`fast_breaker_open`, `fast_failed_escalate_capable`), and
+`TracingLLMGateway` includes it in the same `call_metadata` JSON field
+Stage 14 already writes — no new table, no new call type, no new
+subsystem. One reason code — `capable_breaker_open_fail_fast` — produces
+no trace row at all: there is no underlying call to attach one to when
+both tiers are circuit-open, and fabricating a row for a call that never
+happened would misrepresent what occurred. That case is still visible
+via a `logger.warning`, which is what "when practical" (the brief's own
+phrasing) resolves to here. Live-verified: real successful extraction
+and triage runs show `complexity_route_fast`/`complexity_route_capable`
+on every trace; the forced-outage run above shows
+`fast_failed_escalate_capable` on every capable-tier escalation.
+
+**Decision 5 — "cost-aware" stays honest.** Per explicit instruction:
+Stage 19 does not claim dynamic cost-based routing. Ollama is local with
+no per-token provider cost, so there is no real cost signal to route on
+today. What actually ships is latency and failure *visibility* —
+`scripts/ai_traces_report.py` gained a per-`(provider, model)` breakdown
+(count, avg latency, error rate) alongside the existing per-call-type
+one, using data `ai_call_traces` already collects — plus the
+configurable reliability policy above. This is the honest, current-state
+answer to "cost/latency-aware selection": visibility and policy, not
+routing decisions actually driven by a cost number that doesn't exist in
+this deployment.
+
+**Real verification beyond the unit/integration test suites.** Two live
+scenarios against real infrastructure, not mocks, in addition to the
+`httpx.MockTransport`-based classification tests (`test_ollama_gateway_
+classification.py`) and the `CircuitBreaker` state-machine tests
+(`test_circuit_breaker.py`): (1) both tiers pointed at an unreachable
+port — real connection-refused errors, breakers opened at exactly the
+configured threshold, the 4th call failed with zero network calls
+attempted, all confirmed via `ai_call_traces`; (2) the fast tier pointed
+at a real-but-nonexistent model name against the actually-running Ollama
+— real `404`s, correctly classified `PERMANENT`, breaker never opened
+across 5 consecutive failures, escalation to capable succeeded every
+single time. Also re-ran both Stage 17 evaluators for real: extraction
+unchanged (100%/80%); the faithfulness judge this run showed 3/4
+faithful (one scenario flagged for omitting a high-severity finding) —
+consistent with, not contradicting, Stage 15/17's already-documented
+finding that this judge's reasoning varies run to run, reported here
+plainly rather than cherry-picked.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency
@@ -1621,6 +1736,12 @@ stack every other table in this project already uses. No comparison/eval
 framework (e.g. `promptfoo`, `deepeval`) needed for a purpose-built
 engine this small.
 
+**Stage 19 (`app/llm_gateway/circuit_breaker.py`):** No new Python
+dependencies — the breaker is plain Python (`enum`, `time.monotonic`),
+and the classification/retry changes reuse `httpx` and `pydantic`,
+already dependencies. The classification tests use `httpx.MockTransport`,
+built into `httpx` itself — no new mocking library.
+
 ---
 
 ## Roadmap
@@ -1652,6 +1773,6 @@ each stage as it happens, plus a status line per stage below.
 | 16 | Model routing | Done — `RoutingLLMGateway` routes on a caller-supplied `TaskComplexity` hint (`SIMPLE`/`COMPLEX`), not an inferred signal: triage synthesis and the eval judge request `COMPLEX` and always go to the new local `qwen2.5:14b` "capable" tier; extraction stays `SIMPLE` (fast tier) by default for cost/latency, per chunk. Any fast-tier `LLMGenerationError` escalates once to the capable tier. `TracingLLMGateway` wraps each model individually (not the router) so `ai_call_traces.model` always reflects the model that actually served the call. 110/110 backend tests pass. Real, live-verified: extraction traced to `qwen2.5:3b`/`simple`, triage traced to `qwen2.5:14b`/`complex`; a forced fast-tier failure (misconfigured model name, real 404) correctly escalated to the capable tier end-to-end, logged and traced; both Stage 15 evaluators re-run under the new routing — extraction unchanged (100%/80%), the faithfulness judge (now capable-tier) scored 4/4 faithful with clean, self-consistent reasoning on every scenario, no repeat of Stage 15's documented run-to-run inconsistency; full Docker Compose stack rebuilt and confirmed healthy with no code changes needed |
 | 17 | Eval-integrated CI | Done — `evals/extraction/run.py` and `evals/triage_faithfulness/run.py` refactored to expose reusable `run_extraction_eval`/`run_triage_eval` functions taking the `LLMGateway` as a parameter; new `evals/smoke_test.py` drives both against a deterministic `FakeLLMGateway` (not real Ollama, unavailable in CI) and asserts a perfect score, now run as a CI step in the `backend` job on every push. Verified as a real tripwire, not a rubber stamp, by temporarily breaking the extraction scoring function and confirming the smoke test failed loudly (then reverting and confirming it passed again). A real bug caught before it shipped: the smoke test step must run right after migrations and *before* `pytest`, not after — `pytest`'s session-scoped `db_engine` fixture drops every table at teardown while `alembic_version` stays at head, which would have made the smoke test fail with the project's well-documented "relation does not exist" gotcha if ordered naively; reproduced the exact CI step ordering locally (migrate → smoke test → pytest) to confirm it end-to-end. Both real evaluators re-run against real Ollama post-refactor produced identical results to Stage 16 (100%/80%, 4/4 faithful), confirming the refactor was behavior-preserving. Also fixed a stale claim in `evals/README.md` — the faithfulness judge stopped being "the same 3B model being judged" the moment Stage 16 routed both the triage synthesis call and the judge's own call to the capable `qwen2.5:14b` tier |
 | 18 | Regression testing / release comparison | Done — `evals/comparison.py` (pure, dependency-free): computes aggregate and per-slice metric averages and flags each independently REGRESSED/IMPROVED/UNCHANGED against explicit, direction-aware thresholds (`KNOWN_METRIC_DIRECTIONS` registry — an unregistered metric is `UNKNOWN_DIRECTION`, never guessed) — `overall_status` is REGRESSED the instant any row anywhere regresses, aggregate improvement never masks it (proven by the brief's exact required example, encoded verbatim as a test). Three new tenant-unscoped tables (`evaluation_runs`, `evaluation_case_results`, `evaluation_comparisons`, migration 0009, verified via empty autogenerate diff from both zero and the Stage 17 head). `evals/record_run.py`/`evals/compare_runs.py` are the CLI surface — the latter prints a CLI report and exits non-zero on regression. Real datasets got real slice tags (not fabricated categories). CI stays fully deterministic per explicit constraint: `evals/smoke_test.py` gained a third fake-model check proving the whole record → persist → compare → persist-the-comparison path; a real 3B-vs-14B comparison is a manual-only demonstration, never run in CI. 110/110 backend tests plus 13 new pure comparison tests (run via `pytest evals/`, not folded into apps/api's suite) all pass. Real, live-verified: duplicate case keys rejected by a DB constraint, duplicate labels safely disambiguated (most-recent-wins, printed note), cross-evaluator comparison rejected, FK delete behavior confirmed both ways (cascade for case results, restricted for a referenced run) — and a real, honestly-reported finding: the one manual real-model demo (`qwen2.5:3b` vs `qwen2.5:14b`) showed the larger model scoring *worse* on this specific 4-case dataset in this one run — a factual result from that run, not a general claim that either model is superior or inferior at extraction |
-| 19 | Production model policy: routing/fallback hardening, cost/latency-aware selection | Planned — builds on Stage 16's existing `RoutingLLMGateway` (complexity-based routing, fast-tier-failure escalation already exist); this stage hardens and generalises that layer for production use (richer fallback policy, cost/latency-aware selection), not a new routing mechanism from scratch |
+| 19 | Production model policy: routing/fallback hardening, cost/latency-aware selection | Done — builds on Stage 16's existing `RoutingLLMGateway`, hardened rather than replaced: per-tier `CircuitBreaker` (in-memory, symmetric — both fast and capable), opening only on `LLMFailureKind.TRANSIENT` failures (connection/timeout/5xx) and explicitly never on `CONTENT` (malformed model output) or `PERMANENT` (4xx/bad request) ones, so one bad response can't mark a healthy provider down. Retry is now kind-aware too — a `PERMANENT` failure breaks the retry loop immediately instead of blindly exhausting `max_attempts`; `OllamaGateway`'s retry count/timeout are now `Settings`-driven, not hardcoded. Every routed call carries a `route_reason` (`complexity_route_fast`/`complexity_route_capable`/`fast_breaker_open`/`fast_failed_escalate_capable`), recorded in the existing `ai_call_traces.call_metadata` — no new observability subsystem; the one case with no underlying call (`capable_breaker_open_fail_fast`) is logged, not fabricated as a trace row. `scripts/ai_traces_report.py` gained a per-`(provider, model)` latency/error-rate breakdown. Deliberately does not claim cost-based routing — Ollama has no per-token cost, so this stays latency/failure visibility plus configurable reliability policy, honestly scoped. 134/134 backend tests pass (24 new: circuit breaker state machine, failure classification via `httpx.MockTransport`, reason codes, breaker-open skip/fail-fast behavior). Real, live-verified against actual infrastructure: both tiers pointed at an unreachable port opened their breakers at exactly the configured threshold after 3 real connection-refused errors, and a 4th call failed with zero network calls attempted; the fast tier pointed at a real nonexistent Ollama model produced 5 consecutive real 404s, correctly classified `PERMANENT`, that never opened the breaker while still escalating to capable every time |
 | 20 | Security + production-readiness hardening | Planned |
 | 21 | Deployment, S3-compatible storage, multi-replica-safe migrations, final polish | Planned |

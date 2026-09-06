@@ -1,11 +1,36 @@
 import json
+import logging
 
 import httpx
 from pydantic import ValidationError
 
-from app.llm_gateway.base import LLMGateway, LLMGenerationError, SchemaT, TaskComplexity
+from app.llm_gateway.base import (
+    LLMFailureKind,
+    LLMGateway,
+    LLMGenerationError,
+    SchemaT,
+    TaskComplexity,
+)
 
-_MAX_ATTEMPTS = 2
+logger = logging.getLogger(__name__)
+
+
+def _classify_transport_error(exc: httpx.HTTPError) -> LLMFailureKind:
+    """A network-level failure (connection refused, timeout, DNS — every
+    httpx.TransportError) has no status code and is always plausibly
+    transient. An HTTP-status failure (raised by `raise_for_status()`) is
+    transient only at 5xx (the provider's own problem, e.g. temporarily
+    overloaded); a 4xx means our request itself was bad (unknown model
+    name, malformed schema) — retrying the identical request won't help,
+    and it isn't a signal the provider is unhealthy.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return (
+            LLMFailureKind.TRANSIENT
+            if exc.response.status_code >= 500
+            else LLMFailureKind.PERMANENT
+        )
+    return LLMFailureKind.TRANSIENT
 
 
 class OllamaGateway(LLMGateway):
@@ -20,10 +45,23 @@ class OllamaGateway(LLMGateway):
     ExtractionService) rather than asked of the model.
     """
 
-    def __init__(self, *, base_url: str, model: str, timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 60.0,
+        max_attempts: int = 2,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._max_attempts = max_attempts
+        # Test-support only: lets test_ollama_gateway_classification.py
+        # inject an httpx.MockTransport for deterministic transport/status
+        # failures, without a new mocking dependency or real Ollama.
+        self._transport = transport
 
     async def generate_structured(
         self,
@@ -32,25 +70,56 @@ class OllamaGateway(LLMGateway):
         user_prompt: str,
         schema: type[SchemaT],
         complexity: TaskComplexity = TaskComplexity.SIMPLE,
+        route_reason: str | None = None,
     ) -> SchemaT:
         del complexity  # one model, nothing to route between — see base.py
+        del route_reason  # meaningful to a router's own tracing, not to a leaf gateway
+
         last_error: Exception | None = None
-        for _attempt in range(_MAX_ATTEMPTS):
+        last_kind = LLMFailureKind.TRANSIENT
+        attempts_made = 0
+
+        for attempt in range(1, self._max_attempts + 1):
+            attempts_made = attempt
             try:
                 content = await self._chat(
                     system_prompt=system_prompt, user_prompt=user_prompt, schema=schema
                 )
                 return schema.model_validate(json.loads(content))
-            except (httpx.HTTPError, json.JSONDecodeError, ValidationError) as exc:
+            except httpx.HTTPError as exc:
                 last_error = exc
+                last_kind = _classify_transport_error(exc)
+            except (json.JSONDecodeError, ValidationError) as exc:
+                last_error = exc
+                last_kind = LLMFailureKind.CONTENT
+
+            if last_kind == LLMFailureKind.PERMANENT:
+                # A bad request/config error is deterministic — retrying
+                # the identical request wastes time without a chance of a
+                # different outcome. Fail fast instead of blindly
+                # exhausting every attempt.
+                break
+            if attempt < self._max_attempts:
+                logger.warning(
+                    "Ollama model %r attempt %d/%d failed (%s), retrying: %s",
+                    self._model,
+                    attempt,
+                    self._max_attempts,
+                    last_kind.value,
+                    last_error,
+                )
 
         raise LLMGenerationError(
             f"Ollama model {self._model!r} did not produce valid {schema.__name__} "
-            f"output after {_MAX_ATTEMPTS} attempts: {last_error}"
+            f"output after {attempts_made} attempt(s): {last_error}",
+            kind=last_kind,
+            attempts=attempts_made,
         ) from last_error
 
     async def _chat(self, *, system_prompt: str, user_prompt: str, schema: type[SchemaT]) -> str:
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds, transport=self._transport
+        ) as client:
             response = await client.post(
                 f"{self._base_url}/api/chat",
                 json={

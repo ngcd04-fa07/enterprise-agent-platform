@@ -84,6 +84,44 @@ async def test_tracing_llm_gateway_records_failure(db_session: AsyncSession) -> 
     trace = await _latest_trace(db_session, AICallType.LLM_GENERATE)
     assert trace.status == AICallStatus.FAILURE
     assert trace.error_message is not None
+    # Stage 19: a failure trace records the failure's kind and how many
+    # attempts the underlying gateway actually made, not just that it
+    # eventually gave up.
+    assert '"kind": "transient"' in trace.call_metadata
+    assert '"attempts": 1' in trace.call_metadata
+
+
+async def test_tracing_llm_gateway_records_route_reason_when_present(
+    db_session: AsyncSession,
+) -> None:
+    fake = FakeLLMGateway()
+    fake.default_response = {"summary": "ok"}
+    gateway = TracingLLMGateway(fake, provider="fake-provider", model="fake-model-v1")
+
+    await gateway.generate_structured(
+        system_prompt="sys",
+        user_prompt="unique-prompt-route-reason-1",
+        schema=ChunkExtraction,
+        route_reason="complexity_route_fast",
+    )
+
+    trace = await _latest_trace(db_session, AICallType.LLM_GENERATE)
+    assert '"route_reason": "complexity_route_fast"' in trace.call_metadata
+
+
+async def test_tracing_llm_gateway_omits_route_reason_when_not_given(
+    db_session: AsyncSession,
+) -> None:
+    fake = FakeLLMGateway()
+    fake.default_response = {"summary": "ok"}
+    gateway = TracingLLMGateway(fake, provider="fake-provider", model="fake-model-v1")
+
+    await gateway.generate_structured(
+        system_prompt="sys", user_prompt="unique-prompt-no-route-reason-1", schema=ChunkExtraction
+    )
+
+    trace = await _latest_trace(db_session, AICallType.LLM_GENERATE)
+    assert "route_reason" not in trace.call_metadata
 
 
 async def test_tracing_embedding_provider_records_query_and_documents(

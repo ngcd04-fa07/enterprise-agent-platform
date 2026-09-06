@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # docs/architecture.md, model routing decision. Same no-API-key rationale
     # as ollama_model; just a second, larger local model.
     ollama_capable_model: str = "qwen2.5:14b"
+    # Stage 19: previously hardcoded constants in OllamaGateway, now
+    # tunable without a redeploy. Same defaults as before this stage.
+    ollama_timeout_seconds: float = 60.0
+    ollama_max_attempts: int = 2
+    # Stage 19: per-tier circuit breaker thresholds (see
+    # app/llm_gateway/circuit_breaker.py) — how many consecutive
+    # *transient* failures (never content/permanent ones) open a tier's
+    # breaker, and how long it stays open before a half-open probe.
+    llm_breaker_failure_threshold: int = 3
+    llm_breaker_cooldown_seconds: float = 30.0
 
 
 @lru_cache

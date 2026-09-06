@@ -1,9 +1,15 @@
 """Prints a summary of recorded AI call traces (app/observability) —
-count, average latency, and error rate per call type, plus the most
-recent failures if any. A quick way to actually look at AI-system health
-without building a dashboard or a new HTTP endpoint for it yet — see
-docs/architecture.md, Stage 14 decision, for why this data isn't exposed
-through the tenant-facing API in this first version.
+count, average latency, and error rate per call type and per provider/
+model, plus the most recent failures if any. A quick way to actually look
+at AI-system health without building a dashboard or a new HTTP endpoint
+for it yet — see docs/architecture.md, Stage 14 decision, for why this
+data isn't exposed through the tenant-facing API in this first version.
+
+The per-model breakdown (Stage 19) is what "latency/failure visibility"
+for Stage 16's routing actually cashes out to for a local-only
+deployment with no per-token provider cost: which tier is actually slow
+or failing right now, the same signal a tier's circuit breaker (see
+app/llm_gateway/circuit_breaker.py) reacts to automatically.
 
 Usage (from apps/api, with its venv active):
     DATABASE_URL=... SESSION_SECRET=... python3 scripts/ai_traces_report.py
@@ -45,6 +51,22 @@ async def main() -> None:
                 f"{call_type:<20} {count:<8} {avg_latency_ms:<20.1f} {failure_count / count:<10.1%}"
             )
         if not by_type:
+            print("(no traces recorded yet)")
+
+        by_model: dict[tuple[str, str], list[AICallTrace]] = defaultdict(list)
+        for trace in all_traces:
+            by_model[(trace.provider, trace.model)].append(trace)
+
+        print(f"\n{'Provider/model':<30} {'Count':<8} {'Avg latency (ms)':<20} {'Error rate':<10}")
+        for (provider, model), traces in sorted(by_model.items()):
+            count = len(traces)
+            avg_latency_ms = sum(t.latency_ms for t in traces) / count
+            failure_count = sum(1 for t in traces if t.status == AICallStatus.FAILURE)
+            print(
+                f"{provider + '/' + model:<30} {count:<8} {avg_latency_ms:<20.1f} "
+                f"{failure_count / count:<10.1%}"
+            )
+        if not by_model:
             print("(no traces recorded yet)")
 
         failures = sorted(
