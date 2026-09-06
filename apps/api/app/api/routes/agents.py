@@ -17,6 +17,7 @@ from app.repositories.agent_run_repository import (
 )
 from app.repositories.agent_tool_call_repository import AgentToolCallRepository
 from app.schemas.agent import AgentRunRead, AgentToolCallRead
+from app.security.demo_guard import enforce_demo_llm_rate_limit
 from app.services.agent_service import AgentService
 from app.services.submission_service import SubmissionNotFoundError, SubmissionService
 
@@ -62,7 +63,7 @@ async def _build_run_read(
     "/submissions/{submission_id}/agent-runs",
     response_model=AgentRunRead,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(enforce_demo_llm_rate_limit)],
 )
 async def create_agent_run(
     submission_id: UUID,

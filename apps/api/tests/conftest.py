@@ -117,10 +117,12 @@ def _reset_rate_limiters() -> None:
         _login_ip_limiter,
         _register_ip_limiter,
     )
+    from app.security.demo_guard import reset_demo_rate_limiter_for_tests
 
     _login_ip_limiter.cache_clear()
     _login_identifier_limiter.cache_clear()
     _register_ip_limiter.cache_clear()
+    reset_demo_rate_limiter_for_tests()
 
 
 @pytest.fixture

@@ -1899,6 +1899,101 @@ skipped by oversight — each is named here explicitly so the boundary of
 what this build actually is stays clear at the point where the roadmap
 ends.
 
+## Decision: Public demo deployment (post-roadmap, not a numbered stage)
+
+After all 21 roadmap stages, a genuinely separate, smaller piece of work:
+making a public, recruiter-clickable demo possible without either running
+real infrastructure cost/risk unbounded, or quietly weakening any of the
+security posture Stage 20 built. Deliberately not folded into Stage 21 or
+given a new stage number — this changes nothing about the application's
+own architecture *decisions*, only adds a second, narrower, gateway
+implementation and an opt-in guardrail mode behind one new setting.
+
+**Hosted LLM behind the existing gateway abstraction (`GroqGateway`,
+`app/llm_gateway/groq_gateway.py`).** A public demo has no local Ollama
+instance to reach. `Settings.llm_provider` (`"ollama"` default, `"groq"`
+for the demo) selects which `LLMGateway` implementation
+`app/llm_gateway/factory.py` builds for both routing tiers — the one and
+only place this touches, per CLAUDE.md's "no hidden provider coupling."
+`GroqGateway` mirrors `OllamaGateway`'s shape exactly (same retry/failure-
+kind classification, same schema-validated structured output via Pydantic)
+with one real difference: a hosted API actually rate-limits, so HTTP 429 is
+classified `TRANSIENT` (worth a real retry) rather than falling into the
+generic "any 4xx is a permanent config error" bucket a local, unthrottled
+Ollama instance never needed to distinguish. This is a stated, temporary
+exception to the Stage 9 architecture decision (local, open-weight models,
+no API key, no per-token cost) for the public demo specifically — not a
+reversal of it.
+
+**Demo-mode guardrails (`Settings.demo_mode`, `app/security/demo_guard.py`).**
+Off by default everywhere (local dev, CI, any non-public deployment is
+completely unaffected). When on: `POST /auth/register` returns 403 — one
+fixed, pre-seeded account is the only way in, never an open signup a
+visitor could use to create unlimited organisations — and the two routes
+that actually spend LLM tokens (extraction trigger, triage trigger) get a
+tight, per-IP sliding-window rate limit, reusing Stage 20's
+`InMemoryRateLimiter` rather than inventing new limiter machinery. Keyed
+per-IP rather than per-account because every visitor shares the one demo
+account — per-account limiting would do nothing to separate one visitor's
+request volume from another's.
+
+**Synthetic demo data (`scripts/seed_demo_data.py`).** Idempotent (checks
+for the demo account first, does nothing if it already exists), and runs
+the real pipeline — upload, ingestion, extraction, triage — against
+whatever storage/embedding/LLM backends are actually configured, not a
+fake gateway. Live-verified in this session against a real, freshly-
+migrated local Postgres, the real `fastembed` embedding model, and the
+real local Ollama model (not Groq — Groq wasn't provisioned in this
+session; see `docs/deployment.md`): all three synthetic PDFs ingested
+successfully, extraction correctly found 4 of 5 fields (named_insured,
+business_description, requested_effective_date, requested_coverage_limit)
+and correctly left `broker_or_agent_name` null — none of the three
+synthetic documents mention a broker, deliberately, so the demo has a real
+finding to show rather than a uniformly clean result — and triage
+correctly flagged that absence as a real LOW-severity flag and recommended
+`approve` (LOW-only flags don't force `refer` — see
+`app/agents/underwriting_rules.py`), confirmed directly via `psql` against
+`extracted_fields` and `agent_tool_calls`, not just the script's own
+printed output.
+
+**An honest scope note, not a gap fixed here:** the demo's *documents* are
+synthetic but its *behavior* is exactly what the real system already does
+— there is no cross-document numeric reconciliation (e.g. "application
+revenue vs. financial-statement revenue") anywhere in this codebase. The
+five extracted fields (`app/schemas/extraction.py`) and the four
+deterministic triage rules (`app/agents/underwriting_rules.py`) are the
+whole of what exists; the demo's one real finding is a missing-field flag,
+not a numeric-mismatch flag, because that's what this system actually
+checks for today. Building real cross-document reconciliation would be a
+genuine new feature, not a demo-polish task — out of scope here.
+
+**Trace/eval visibility in the demo: a static snapshot, not a new live
+endpoint.** The original ask was for the demo to let a visitor "inspect
+trace/eval result" live. Looking at `app/models/ai_call_trace.py` before
+building anything: `AICallTrace` deliberately has no `organisation_id` and
+no link to a submission or agent run at all (Stage 14's decision — it's
+operational/SRE data, analogous to a server log line, not tenant business
+data). Retrofitting a tenant-scoped, submission-linked trace viewer would
+mean either a real schema change to a table whose whole point is *not*
+being tenant-scoped, or a fragile time-window correlation that could
+misattribute one organisation's trace rows to another's request — exactly
+the kind of gap this project's own tenant-isolation testing discipline
+exists to catch, not reintroduce for a demo. So the demo's trace/eval view
+is a static rendering of the one real recorded run from the seed script
+(latency, model, route reason, and — separately — one real recorded
+`evals/` comparison), not a queryable table. This is also what "don't
+expose operator eval tables" in the original ask actually rules out.
+
+**What's deliberately not built yet:** the frontend has no demo-specific UI
+(a banner naming the demo account, the static trace/eval view described
+above) — `docs/deployment.md` and this entry are the current source of
+truth on what the backend supports until that lands. Actually provisioning
+Render/Neon/Cloudflare R2/Groq and deploying was left to the user to do by
+hand, following `docs/deployment.md`, rather than done from this session —
+no third-party account credentials were available to verify any of that
+guide's steps against real infrastructure, unlike everything else in this
+document.
+
 ## Dependency decisions log
 
 Recorded as they're actually added, with justification, per the dependency

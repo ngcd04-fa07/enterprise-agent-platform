@@ -13,6 +13,7 @@ from app.models.membership import MembershipRole, OrganisationMembership
 from app.repositories.extracted_field_repository import ExtractedFieldRepository
 from app.repositories.extraction_run_repository import ExtractionRunRepository
 from app.schemas.extraction import ExtractedFieldRead, ExtractionResponse
+from app.security.demo_guard import enforce_demo_llm_rate_limit
 from app.services.extraction_service import ExtractionService
 from app.services.submission_service import SubmissionNotFoundError, SubmissionService
 
@@ -45,7 +46,7 @@ async def _build_response(
 @router.post(
     "/submissions/{submission_id}/extract",
     response_model=ExtractionResponse,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(enforce_demo_llm_rate_limit)],
 )
 async def extract_submission(
     submission_id: UUID,

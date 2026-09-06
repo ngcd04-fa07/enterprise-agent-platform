@@ -117,6 +117,12 @@ async def register(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AuthResponse:
+    if settings.demo_mode:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Registration is disabled on this public demo — log in with the demo account "
+            "shown on the login page.",
+        )
     _enforce_rate_limit(_register_ip_limiter(), key=_client_ip(request))
     try:
         result = await AuthService(db, settings).register(

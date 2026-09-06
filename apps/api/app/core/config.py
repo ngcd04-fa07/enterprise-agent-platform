@@ -116,6 +116,38 @@ class Settings(BaseSettings):
     llm_breaker_failure_threshold: int = 3
     llm_breaker_cooldown_seconds: float = 30.0
 
+    # Which LLMGateway implementation app/llm_gateway/factory.py builds
+    # for both routing tiers. "ollama" (default, unchanged behavior) needs
+    # nothing else below. "groq" is for a public demo deployment that has
+    # no local Ollama instance to point at — see app/llm_gateway/
+    # groq_gateway.py's docstring for why this is a deliberate, stated
+    # exception to the project's local-model architecture decision, not a
+    # replacement for it. groq_api_key is never given a default: a demo
+    # deployment misconfigured to "groq" with no key must fail loudly at
+    # startup, not silently fall back to a broken gateway.
+    llm_provider: Literal["ollama", "groq"] = "ollama"
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.1-8b-instant"
+    groq_capable_model: str = "llama-3.3-70b-versatile"
+
+    # A public demo deployment: one fixed, pre-seeded account only (no
+    # public registration), and tight per-IP limits on the two routes that
+    # actually spend LLM tokens (extraction, triage) — see
+    # app/api/routes/auth.py and app/security/demo_rate_limiter.py. False
+    # (default) leaves every environment's existing behavior unchanged.
+    demo_mode: bool = False
+    demo_llm_rate_limit_per_ip_max_attempts: int = 5
+    demo_llm_rate_limit_per_ip_window_seconds: float = 3600.0
+
+    @model_validator(mode="after")
+    def _validate_groq_provider_has_a_key(self) -> "Settings":
+        if self.llm_provider == "groq" and self.groq_api_key is None:
+            raise ValueError(
+                "groq_api_key must be set when llm_provider=groq — fail loudly at startup "
+                "rather than the first extraction/triage call failing with an unclear error."
+            )
+        return self
+
     @model_validator(mode="after")
     def _validate_session_secret_strength(self) -> "Settings":
         """A floor, not a real entropy check: length alone doesn't prove a

@@ -258,6 +258,7 @@ Full writeups of all eight: [`docs/architecture.md`](docs/architecture.md).
 
 - [`CLAUDE.md`](CLAUDE.md) — the durable engineering constitution (architecture principles, security rules, workflow discipline) this repo is built under.
 - [`docs/architecture.md`](docs/architecture.md) — decision log, roadmap status table, and every bug found in verification, with root cause and fix.
+- [`docs/deployment.md`](docs/deployment.md) — runbook for a separate, public, synthetic-data-only demo deployment (Render + Neon + Cloudflare R2 + a hosted LLM behind the existing gateway abstraction) — not the same thing as the Quick start above, and not yet deployed as of this writing.
 
 ## Limitations
 
