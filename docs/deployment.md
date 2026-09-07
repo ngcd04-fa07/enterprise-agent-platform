@@ -123,36 +123,54 @@ leave local `.env` permanently pointed at local Postgres.
 
 ## Step 4 — Render: the API service
 
-Create a new Render **Web Service**, connected to this repo, Docker runtime,
-Dockerfile path `apps/api/Dockerfile`.
+Create a new Render **Web Service**, connected to this repo, Docker runtime.
 
-**Start command override** (Render lets you override a Dockerfile's `CMD`
-per service, in the dashboard's Start Command field — you do not need to
-edit `apps/api/Dockerfile` itself): unlike the multi-replica-safe Docker
-Compose setup (which runs migrations in a separate one-shot `migrate`
-service — see Stage 21 in `docs/architecture.md`), Render's free/starter web
-services are single-instance, so the multi-replica migration race that
-change was built to prevent doesn't apply here. For this deployment only,
-override the start command to:
+**This is a monorepo, so two settings matter together** (Settings → Build &
+Deploy, live-verified — an earlier version of this doc got this wrong):
+- **Root Directory:** `apps/api`
+- **Dockerfile Path:** `Dockerfile` (relative to Root Directory — not
+  `apps/api/Dockerfile`; that double-prefixes and fails with a "not found"
+  error at build time)
+
+**Instance type:** Free.
+
+**Docker Command override** (Settings → Build & Deploy → Docker Command):
+unlike the multi-replica-safe Docker Compose setup (which runs migrations in
+a separate one-shot `migrate` service — see Stage 21 in
+`docs/architecture.md`), Render's free/starter web services are
+single-instance, so the multi-replica migration race that change was built
+to prevent doesn't apply here. Set it to:
 
 ```
-alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
+sh render_start.sh
 ```
 
-**Health check path**: `/health` — already the cheapest possible endpoint
-(one `SELECT 1`-equivalent DB ping, no LLM/embedding/retrieval call — see
-`app/api/routes/health.py`), safe to use both for Render's own health check
-and for whatever external keep-alive pinger you point at this service. This
-avoidance of Render's free-tier cold-start sleep is a deployment
-convenience, not a reliability guarantee — nothing in this app depends on
-the service never having cold-started.
+Not an inline `alembic upgrade head && uvicorn ...` string — that was tried
+first and failed live with `sh: 1: alembic upgrade head && uvicorn ...: not
+found`, because Render's Docker Command field's exact quoting/tokenization
+of `&&` and nested quotes isn't something to guess at from the dashboard
+alone. `apps/api/render_start.sh` (committed to the repo, `COPY`'d into the
+image) runs the same two steps with no shell operators or quotes for that
+field to mis-tokenize.
 
-**Environment variables**:
+**Health check path** (Settings → Health Checks → Edit, only available
+after the service exists): `/health` — already the cheapest possible
+endpoint (one `SELECT 1`-equivalent DB ping, no LLM/embedding/retrieval call
+— see `app/api/routes/health.py`), safe to use both for Render's own health
+check and for whatever external keep-alive pinger you point at this
+service. This avoidance of Render's free-tier cold-start sleep is a
+deployment convenience, not a reliability guarantee — nothing in this app
+depends on the service never having cold-started.
+
+**Environment variables** (Environment tab, left sidebar, after the service
+is created — add each individually with **+ Add Environment Variable**;
+don't bulk-upload your actual local `.env` via "Add from .env", it has
+local-dev-only values that would conflict):
 
 | Variable | Value |
 |---|---|
 | `DATABASE_URL` | The Neon connection string from Step 1, converted as described there |
-| `SESSION_SECRET` | A real random value, ≥32 chars — e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `SESSION_SECRET` | A real random value, ≥32 chars — e.g. `openssl rand -base64 32`, or `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` if that's on your PATH |
 | `ENVIRONMENT` | `production` |
 | `DEMO_MODE` | `true` |
 | `STORAGE_BACKEND` | `s3` |
@@ -163,6 +181,8 @@ the service never having cold-started.
 | `AWS_SECRET_ACCESS_KEY` | the R2 token's secret key |
 | `LLM_PROVIDER` | `groq` |
 | `GROQ_API_KEY` | the key from Step 3 |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` — current Groq production model, verified live; check `console.groq.com/docs/models` again if it's been a while, model catalogs move |
+| `GROQ_CAPABLE_MODEL` | `openai/gpt-oss-120b` — same caveat |
 
 Everything else (rate limits, body-size limits, PDF resource ceilings) keeps
 its documented default — see `.env.example` for the full list if you want to
@@ -176,38 +196,46 @@ before anything else.
 
 ## Step 5 — Render: the web (frontend) service
 
-Create a second Render **Web Service**, same repo, Docker runtime, Dockerfile
-path `apps/web/Dockerfile`.
+Create a second Render **Web Service**, same repo, Docker runtime.
 
-**Build arguments** (Render's dashboard has a Docker Build Args section for
-Docker-based services): all three below must be set as **build args**, not
-just runtime env vars — `apps/web/next.config.ts` bakes its `rewrites()`
-destination and `headers()` CSP/HSTS logic in at build time, and
-`NEXT_PUBLIC_DEMO_MODE` is inlined into the client bundle the same way — a
-documented gotcha this project has hit before (Stage 7, Stage 20 — see
-`docs/architecture.md`).
+**Same monorepo settings pattern as Step 4:**
+- **Root Directory:** `apps/web`
+- **Dockerfile Path:** `Dockerfile`
 
-| Build arg | Value |
+**Environment variables** (Environment tab — Render has no separate "build
+args" UI; every environment variable you set here is automatically also
+available as a Docker build arg if the Dockerfile declares a matching
+`ARG`, and as a runtime env var, same list either way — live-verified, an
+earlier version of this doc assumed a separate section that doesn't exist):
+all three below matter at **build** time specifically, not just runtime —
+`apps/web/next.config.ts` bakes its `rewrites()` destination and `headers()`
+CSP/HSTS logic in at build time, and `NEXT_PUBLIC_DEMO_MODE` is inlined into
+the client bundle the same way — a documented gotcha this project has hit
+before (Stage 7, Stage 20 — see `docs/architecture.md`). Since Render
+doesn't distinguish build-time vs. runtime env vars in its UI, just setting
+them once here covers both.
+
+| Variable | Value |
 |---|---|
 | `API_ORIGIN` | the API service's Render URL from Step 4, e.g. `https://enterprise-agent-api.onrender.com` |
 | `ENVIRONMENT` | `production` |
 | `NEXT_PUBLIC_DEMO_MODE` | `true` |
 
-Set the same three as **runtime** environment variables too (belt-and-braces;
-some of Next.js's own server-side code reads `process.env` at request time,
-not just at build time). `NEXT_PUBLIC_DEMO_MODE` only controls the frontend's
-banner/login-page text — it's the API service's own `DEMO_MODE` (Step 4)
-that actually disables registration and rate-limits extraction/triage, so
-don't set one without the other.
+`NEXT_PUBLIC_DEMO_MODE` only controls the frontend's banner/login-page text
+— it's the API service's own `DEMO_MODE` (Step 4) that actually disables
+registration and rate-limits extraction/triage, so don't set one without
+the other.
 
-## Step 6 — Run migrations once, then seed the demo data
+## Step 6 — Seed the demo data
 
-Both steps run from Render's **Shell** tab on the API service (or
-`render ssh` via Render's CLI), once, after the first successful deploy:
+Migrations no longer need a manual step here — `render_start.sh` (Step 4)
+runs `alembic upgrade head` on every boot, same as the local `migrate`
+compose service does. The one remaining manual step is seeding, run once
+from Render's **Shell** tab on the API service (or `render ssh` via Render's
+CLI), after the first successful deploy:
 
 ```bash
-cd /app  # or wherever the Dockerfile's WORKDIR puts the app — check the build logs
-alembic upgrade head   # only needed if the start-command override in Step 4 hasn't run yet
+cd /app  # the Dockerfile's WORKDIR
 python3 scripts/seed_demo_data.py
 ```
 
